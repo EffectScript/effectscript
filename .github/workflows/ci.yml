@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: TypeCheck & Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        working-directory: compiler
+        run: npm ci
+
+      - name: TypeCheck
+        working-directory: compiler
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: compiler
+        run: npm run test
+
+      - name: Build
+        working-directory: compiler
+        run: npm run build

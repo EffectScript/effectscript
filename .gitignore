@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+*.js.map
+
+# IDE
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# TypeScript
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Vitest
+.vitest/
+
+# Docs
+docs/
