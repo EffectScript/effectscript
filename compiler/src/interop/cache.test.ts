@@ -7,6 +7,7 @@ function makeSig(values?: Record<string, Type>): ExportedTypeSignature {
     types: new Map(),
     values: new Map(Object.entries(values ?? {})),
     adtConstructors: new Map(),
+    extensions: new Map(),
   };
 }
 

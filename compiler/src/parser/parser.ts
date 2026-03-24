@@ -28,6 +28,7 @@ import type { Span } from '../utils/span.js';
 import { mergeSpans } from '../utils/span.js';
 import type { DiagnosticCollector } from '../diagnostics/collector.js';
 import { D } from '../diagnostics/codes.js';
+import { KEYWORDS } from '../lexer/tokens.js';
 import type { Token, TokenKind } from '../lexer/tokens.js';
 import type {
   Program, Declaration, Expression, Statement, Pattern, TypeNode,
@@ -70,7 +71,7 @@ const TOKEN_TO_BINOP: Partial<Record<TokenKind, BinaryOperator>> = {
   EqualEqual: '==', BangEqual: '!=',
   Less: '<', Greater: '>', LessEqual: '<=', GreaterEqual: '>=',
   AmpAmp: '&&', PipePipe: '||',
-  QuestionQuestion: '??', PipeGreater: '|>',
+  QuestionQuestion: '??',
 };
 
 // ── Trivia Transfer ─────────────────────────────────────────────────
@@ -163,6 +164,17 @@ class Parser {
   private id(tok: Token): Identifier { return { kind: 'Identifier', name: tok.text, span: tok.span }; }
 
   /**
+   * Consume an identifier or reserved keyword token and return it.
+   * Used in positions where keywords are valid names (member access, property names).
+   */
+  private expectIdentifierName(): Token {
+    const t = this.cur();
+    if (t.kind === 'Identifier' || KEYWORDS.has(t.kind)) return this.advance();
+    this.error(D.E100, `Expected identifier or keyword, found '${t.kind}'`, t.span);
+    return { kind: 'Identifier', text: '', span: t.span, leadingTrivia: [], trailingTrivia: [] };
+  }
+
+  /**
    * Error recovery: skip tokens until a likely statement boundary.
    *
    * Stops at semicolons, closing braces, and declaration keywords
@@ -171,7 +183,7 @@ class Parser {
   private synchronize(): void {
     while (!this.atEnd()) {
       const k = this.cur().kind;
-      if (k === 'Semicolon' || k === 'RightBrace' || k === 'let' || k === 'type' || k === 'import' || k === 'export') return;
+      if (k === 'Semicolon' || k === 'RightBrace' || k === 'let' || k === 'type' || k === 'import' || k === 'export' || k === 'fun') return;
       this.advance();
     }
   }
@@ -216,6 +228,13 @@ class Parser {
       case 'type': return this.typeDecl(false);
       case 'import': return this.importDecl();
       case 'export': return this.exportDecl();
+      case 'fun': return this.extensionFunDecl(false);
+      case 'async':
+        if (this.peek(1).kind === 'fun') {
+          this.advance(); // consume 'async'
+          return this.extensionFunDecl(false, true);
+        }
+        return this.exprOrAssign();
       case 'for': return this.forStmt();
       case 'while': return this.whileStmt();
       case 'throw': return this.throwStmt();
@@ -445,6 +464,21 @@ class Parser {
       return withTrivia(result as unknown as Declaration, exp, this.prev());
     }
 
+    if (this.check('fun') || (this.check('async') && this.peek(1).kind === 'fun')) {
+      const isAsync = this.check('async');
+      if (isAsync) this.advance(); // consume 'async'
+      const decl = this.extensionFunDecl(true, isAsync);
+      if (decl.kind === 'ExtensionFunctionDeclaration') {
+        const result: Record<string, unknown> = {
+          kind: 'ExportDeclaration',
+          declaration: decl,
+          span: mergeSpans(exp.span, decl.span),
+        };
+        return withTrivia(result as unknown as Declaration, exp, this.prev());
+      }
+      return { kind: 'ExportDeclaration', span: mergeSpans(exp.span, decl.span) } as Declaration;
+    }
+
     if (this.check('LeftBrace')) {
       this.advance();
       const specifiers: ExportSpecifier[] = [];
@@ -481,6 +515,116 @@ class Parser {
   }
 
   // ── Statements ─────────────────────────────────────────────────────
+
+  /**
+   * Parse an extension function declaration: `[async] fun [<TypeParams>] ReceiverType.methodName(params): ReturnType => body`.
+   *
+   * @param exported - `true` if this declaration is wrapped by `export`.
+   * @param isAsync - `true` if preceded by `async` keyword.
+   */
+  private extensionFunDecl(exported: boolean, isAsync = false): Declaration | Statement {
+    const funTok = this.advance(); // consume 'fun'
+
+    // Optional type parameters: fun <T> ...
+    let typeParams: TypeParameter[] | undefined;
+    if (this.check('Less')) {
+      typeParams = this.parseTypeParams();
+    }
+
+    // Receiver type: a named type, possibly with type args
+    if (!this.check('Identifier')) {
+      this.error(D.E102, `Expected receiver type after 'fun'`, this.cur().span);
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    const receiverType = this.parseType();
+
+    // Dot separator
+    if (!this.match('Dot')) {
+      this.error(D.E102, `Expected '.' after receiver type in extension function`, this.cur().span);
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    // Method name
+    const nameToken = this.expect('Identifier');
+    const name = this.id(nameToken);
+
+    // Parameters
+    this.expect('LeftParen');
+    const params: FunctionParam[] = [];
+    while (!this.check('RightParen') && !this.atEnd()) {
+      const nt = this.expect('Identifier');
+      const nm = this.id(nt);
+      if (this.match('Colon')) {
+        const ty = this.parseType();
+        if (this.match('Equal')) {
+          const dv = this.expr();
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
+        } else {
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, span: mergeSpans(nt.span, ty.span) });
+        }
+      } else if (this.match('Equal')) {
+        const dv = this.expr();
+        params.push({ kind: 'FunctionParam', name: nm, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
+      } else {
+        params.push({ kind: 'FunctionParam', name: nm, span: nt.span });
+      }
+      if (!this.match('Comma')) break;
+    }
+    this.expect('RightParen');
+
+    // Return type annotation (required — report E222 if missing)
+    if (!this.match('Colon')) {
+      this.error(D.E222, `Extension function requires a return type annotation`, this.cur().span);
+      // Try to parse the rest anyway for recovery
+      if (this.match('FatArrow')) {
+        const body = this.expr();
+        const result: Record<string, unknown> = {
+          kind: 'ExtensionFunctionDeclaration',
+          receiverType, name, params, body, exported,
+          returnType: { kind: 'NamedType', name: { kind: 'Identifier', name: 'void', span: this.prev().span }, span: this.prev().span },
+          span: mergeSpans(funTok.span, this.prev().span),
+        };
+        if (typeParams !== undefined) result['typeParams'] = typeParams;
+        if (isAsync) result['async'] = true;
+        return withTrivia(result as unknown as Declaration, funTok, this.prev());
+      }
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    const returnType = this.parseType();
+
+    // Fat arrow
+    if (!this.match('FatArrow')) {
+      this.error(D.E106, "Expected '=>' after extension function return type", this.cur().span);
+    }
+
+    const body = this.expr();
+
+    const result: Record<string, unknown> = {
+      kind: 'ExtensionFunctionDeclaration',
+      receiverType, name, params, returnType, body, exported,
+      span: mergeSpans(funTok.span, this.prev().span),
+    };
+    if (typeParams !== undefined) result['typeParams'] = typeParams;
+    if (isAsync) result['async'] = true;
+    return withTrivia(result as unknown as Declaration, funTok, this.prev());
+  }
 
   /** Parse a `for (x in iterable) { ... }` loop statement. */
   private forStmt(): Statement {
@@ -661,6 +805,13 @@ class Parser {
           tok, tok,
         );
       }
+      case 'this': {
+        const tok = this.advance();
+        return withTrivia<Expression>(
+          { kind: 'ThisExpr', span: tok.span },
+          tok, tok,
+        );
+      }
       case 'if': return this.ifExpr();
       case 'match': return this.matchExpr();
       case 'try': return this.tryCatch();
@@ -681,6 +832,18 @@ class Parser {
         const o = this.expr(9);
         return withTrivia<Expression>(
           { kind: 'UnaryExpr', operator: '-', operand: o, span: mergeSpans(tok.span, o.span) },
+          tok, this.prev(),
+        );
+      }
+      case 'async': return this.asyncArrowFn();
+      case 'await': {
+        const tok = this.advance();
+        // Parse at unary precedence (same as ! and -) so that
+        // `await a + b` parses as `(await a) + b` and
+        // `await a.b()` parses as `await (a.b())`
+        const arg = this.expr(9);
+        return withTrivia<Expression>(
+          { kind: 'AwaitExpr', argument: arg, span: mergeSpans(tok.span, arg.span) },
           tok, this.prev(),
         );
       }
@@ -785,7 +948,7 @@ class Parser {
    */
   private memberExpr(object: Expression, optional: boolean): MemberExpr {
     this.advance();
-    const pt = this.expect('Identifier');
+    const pt = this.expectIdentifierName();
     return { kind: 'MemberExpr', object, property: this.id(pt), optional, span: mergeSpans(object.span, pt.span) };
   }
 
@@ -952,11 +1115,11 @@ class Parser {
   private braceExpr(): Expression {
     const n = this.peek(1);
     if (n.kind === 'RightBrace') return this.recordExpr();
-    if (n.kind === 'Identifier') {
+    if (n.kind === 'Identifier' || KEYWORDS.has(n.kind)) {
       const after = this.peek(2).kind;
       // { ident: ... } → explicit record field
-      // { ident, ... } → shorthand record field
-      if (after === 'Colon' || after === 'Comma') return this.recordExpr();
+      // { ident, ... } → shorthand record field (only for identifiers, not keywords)
+      if (after === 'Colon' || (after === 'Comma' && n.kind === 'Identifier')) return this.recordExpr();
     }
     return this.blockExpr();
   }
@@ -966,7 +1129,7 @@ class Parser {
     const lb = this.advance();
     const fields: RecordField[] = [];
     while (!this.check('RightBrace') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
+      const nt = this.expectIdentifierName();
       if (this.match('Colon')) {
         // Explicit: { name: expr }
         const v = this.expr();
@@ -1190,6 +1353,110 @@ class Parser {
     );
   }
 
+  /**
+   * Parse an async arrow function: `async (params) => body` or `async <T>(params) => body`.
+   *
+   * Assumes the current token is `async`. The token after `async` must be `(` or `<`
+   * (since `async` is a reserved keyword, no ambiguity with identifiers).
+   */
+  private asyncArrowFn(): Expression {
+    const asyncTok = this.advance(); // consume 'async'
+    if (this.check('Less') && this.isGenericArrow()) {
+      // async <T>(params) => body
+      const typeParams = this.parseTypeParams();
+      return this.arrowFnWithTypeParamsAsync(asyncTok, typeParams);
+    }
+    if (this.check('LeftParen')) {
+      // async (params) => body
+      return this.arrowFnAsync(asyncTok);
+    }
+    this.error(D.E101, "Expected '(' or '<' after 'async'", this.cur().span);
+    const sp = this.pos; this.advance();
+    return this.errorNode(sp) as unknown as Expression;
+  }
+
+  /** Parse an async arrow function with type params already consumed. */
+  private arrowFnWithTypeParamsAsync(asyncTok: Token, typeParams: TypeParameter[]): Expression {
+    this.advance(); // skip '('
+    const params = this.parseFnParams();
+    this.expect('RightParen');
+
+    let returnType: TypeNode | undefined;
+    if (this.match('Colon')) returnType = this.parseType();
+
+    if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+    const body = this.expr();
+
+    const result: Record<string, unknown> = {
+      kind: 'ArrowFunction',
+      async: true,
+      typeParams,
+      params,
+      body,
+      span: mergeSpans(asyncTok.span, this.prev().span),
+    };
+    if (returnType !== undefined) result['returnType'] = returnType;
+    return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+  }
+
+  /** Parse an async non-generic arrow function: `async (params) [: ReturnType] => body`. */
+  private arrowFnAsync(asyncTok: Token): Expression {
+    this.advance(); // skip '('
+    const params = this.parseFnParams();
+    this.expect('RightParen');
+
+    if (this.match('Colon')) {
+      const returnType = this.parseType();
+      if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+      const body = this.expr();
+      const result: Record<string, unknown> = {
+        kind: 'ArrowFunction',
+        async: true,
+        params,
+        returnType,
+        body,
+        span: mergeSpans(asyncTok.span, this.prev().span),
+      };
+      return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+    }
+
+    if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+    const body = this.expr();
+    const result: Record<string, unknown> = {
+      kind: 'ArrowFunction',
+      async: true,
+      params,
+      body,
+      span: mergeSpans(asyncTok.span, this.prev().span),
+    };
+    return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+  }
+
+  /** Parse function parameter list (used by async and regular arrows). */
+  private parseFnParams(): FunctionParam[] {
+    const params: FunctionParam[] = [];
+    while (!this.check('RightParen') && !this.atEnd()) {
+      const nt = this.expect('Identifier');
+      const nm = this.id(nt);
+      if (this.match('Colon')) {
+        const ty = this.parseType();
+        if (this.match('Equal')) {
+          const dv = this.expr();
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
+        } else {
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, span: mergeSpans(nt.span, ty.span) });
+        }
+      } else if (this.match('Equal')) {
+        const dv = this.expr();
+        params.push({ kind: 'FunctionParam', name: nm, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
+      } else {
+        params.push({ kind: 'FunctionParam', name: nm, span: nt.span });
+      }
+      if (!this.match('Comma')) break;
+    }
+    return params;
+  }
+
   // ── Patterns ───────────────────────────────────────────────────────
 
   /**
@@ -1235,7 +1502,7 @@ class Parser {
     const lb = this.advance();
     const fields: RecordPatternField[] = [];
     while (!this.check('RightBrace') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
+      const nt = this.expectIdentifierName();
       if (this.match('Colon')) {
         fields.push({ name: this.id(nt), pattern: this.parsePattern() });
       } else {

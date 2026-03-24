@@ -169,6 +169,21 @@ export class ScopeManager {
     return undefined;
   }
 
+  /**
+   * Reverse-lookup: find the type alias name for a given type.
+   * Searches from innermost to outermost scope, returning the first match.
+   */
+  findTypeName(type: Type): string | undefined {
+    let scope: Scope | undefined = this.current;
+    while (scope !== undefined) {
+      for (const [name, t] of scope.types) {
+        if (t === type) return name;
+      }
+      scope = scope.parent;
+    }
+    return undefined;
+  }
+
   // ── Mutability check ───────────────────────────────────
 
   /**

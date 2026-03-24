@@ -42,6 +42,8 @@ export type Type =
   | GenericType
   | TypeVariable
   | PromiseType
+  | SetType
+  | MapType
   | ErrorType;
 
 // ── Type Variants ───────────────────────────────────────────
@@ -79,6 +81,8 @@ export interface FunctionType {
   readonly returnType: Type;
   /** Generic type parameters, e.g. `<T, E>`. Present only for generic functions. */
   readonly typeParams?: readonly TypeParam[];
+  /** Rest parameter (variadic): allows unbounded extra arguments of `elementType`. */
+  readonly rest?: { readonly name: string; readonly elementType: Type };
 }
 
 /** Record (structural object) type with named fields. */
@@ -153,6 +157,19 @@ export interface PromiseType {
   readonly inner: Type;
 }
 
+/** Set type parameterized by element type. Maps to JavaScript's native `Set`. */
+export interface SetType {
+  readonly kind: 'set';
+  readonly element: Type;
+}
+
+/** Map type parameterized by key and value types. Maps to JavaScript's native `Map`. */
+export interface MapType {
+  readonly kind: 'map';
+  readonly key: Type;
+  readonly value: Type;
+}
+
 /**
  * Error sentinel type.
  *
@@ -211,6 +228,14 @@ export interface TypeParam {
  * module receives an {@link ExportedTypeSignature} and looks up the
  * imported names in the appropriate map.
  */
+/** Metadata for an exported extension function, keyed by emit name. */
+export interface ExportedExtension {
+  readonly receiverType: Type;
+  readonly methodName: string;
+  readonly fnType: FunctionType;
+  readonly emitName: string;
+}
+
 export interface ExportedTypeSignature {
   /** Exported type aliases and ADT type definitions, keyed by name. */
   readonly types: ReadonlyMap<string, Type>;
@@ -218,6 +243,8 @@ export interface ExportedTypeSignature {
   readonly values: ReadonlyMap<string, Type>;
   /** Exported ADT variant constructors, keyed by variant name. */
   readonly adtConstructors: ReadonlyMap<string, FunctionType>;
+  /** Exported extension functions, keyed by emit name. */
+  readonly extensions: ReadonlyMap<string, ExportedExtension>;
 }
 
 // ── Shared Type Constants ───────────────────────────────────
@@ -365,6 +392,12 @@ export function typesEqual(a: Type, b: Type, depth = 0): boolean {
       for (let i = 0; i < ra.params.length; i++) {
         if (!typesEqual(ra.params[i].type, rbf.params[i].type, depth + 1)) return false;
       }
+      const aRest = ra.rest !== undefined;
+      const bRest = rbf.rest !== undefined;
+      if (aRest !== bRest) return false;
+      if (aRest && bRest) {
+        if (!typesEqual(ra.rest!.elementType, rbf.rest!.elementType, depth + 1)) return false;
+      }
       return typesEqual(ra.returnType, rbf.returnType, depth + 1);
     }
 
@@ -409,6 +442,14 @@ export function typesEqual(a: Type, b: Type, depth = 0): boolean {
 
     case 'promise':
       return typesEqual(ra.inner, (rb as PromiseType).inner, depth + 1);
+
+    case 'set':
+      return typesEqual(ra.element, (rb as SetType).element, depth + 1);
+
+    case 'map': {
+      const rbm = rb as MapType;
+      return typesEqual(ra.key, rbm.key, depth + 1) && typesEqual(ra.value, rbm.value, depth + 1);
+    }
   }
 }
 
@@ -445,6 +486,10 @@ export function isAssignableTo(source: Type, target: Type, depth = 0): boolean {
   // Any/Error are assignable to/from everything
   if (s.kind === 'any' || s.kind === 'error') return true;
   if (t.kind === 'any' || t.kind === 'error') return true;
+
+  // Unresolved type variables are assignable to/from anything (fresh unknowns)
+  if (s.kind === 'typevar') return true;
+  if (t.kind === 'typevar') return true;
 
   // never is assignable to everything (bottom type)
   if (s.kind === 'primitive' && s.name === 'never') return true;
@@ -513,6 +558,16 @@ export function isAssignableTo(source: Type, target: Type, depth = 0): boolean {
     return isAssignableTo(s.element, t.element, depth + 1);
   }
 
+  // Set covariance
+  if (s.kind === 'set' && t.kind === 'set') {
+    return isAssignableTo(s.element, t.element, depth + 1);
+  }
+
+  // Map covariance (both key and value)
+  if (s.kind === 'map' && t.kind === 'map') {
+    return isAssignableTo(s.key, t.key, depth + 1) && isAssignableTo(s.value, t.value, depth + 1);
+  }
+
   // Tuple: same length, each element assignable
   if (s.kind === 'tuple' && t.kind === 'tuple') {
     if (s.elements.length !== t.elements.length) return false;
@@ -545,14 +600,25 @@ export function isAssignableTo(source: Type, target: Type, depth = 0): boolean {
  * Convert a type to its human-readable string representation for diagnostics.
  *
  * Resolves type variables before rendering. Unresolved type variables are
- * displayed as `?T<id>` (e.g. `?T0`).
+ * displayed as `?T<id>` (e.g. `?T0`). Uses a visited set to detect cycles
+ * in self-referential types (e.g. recursive record fields) — cycles render
+ * as `<recursive>` instead of recursing infinitely.
  *
- * @param type - The type to render.
+ * @param type    - The type to render.
+ * @param visited - Types currently being rendered (cycle detection). Callers should omit.
  * @returns A display string (e.g. `"string?"`, `"(number, string) => boolean"`).
  */
-export function typeToString(type: Type): string {
+export function typeToString(type: Type, visited: Set<Type> = new Set()): string {
   const resolved = resolveType(type);
 
+  // Cycle detection: if we're already rendering this type, break the cycle
+  if (visited.has(resolved)) {
+    return '<recursive>';
+  }
+
+  // Only `record` and `function` add themselves to `visited` before recursing.
+  // Other wrapper types (nullable, array, union, etc.) are constructed bottom-up
+  // with fully resolved sub-types, so object-identity cycles cannot form through them.
   switch (resolved.kind) {
     case 'primitive':
       return resolved.name;
@@ -563,28 +629,36 @@ export function typeToString(type: Type): string {
     case 'error':
       return '<error>';
     case 'nullable':
-      return `${typeToString(resolved.inner)}?`;
+      return `${typeToString(resolved.inner, visited)}?`;
     case 'function': {
-      const params = resolved.params.map(p => typeToString(p.type)).join(', ');
-      return `(${params}) => ${typeToString(resolved.returnType)}`;
+      visited.add(resolved);
+      const paramParts = resolved.params.map(p => typeToString(p.type, visited));
+      if (resolved.rest) {
+        paramParts.push(`...${typeToString(resolved.rest.elementType, visited)}[]`);
+      }
+      const result = `(${paramParts.join(', ')}) => ${typeToString(resolved.returnType, visited)}`;
+      visited.delete(resolved);
+      return result;
     }
     case 'record': {
+      visited.add(resolved);
       const fields = Array.from(resolved.fields.entries())
-        .map(([name, t]) => `${name}: ${typeToString(t)}`)
+        .map(([name, t]) => `${name}: ${typeToString(t, visited)}`)
         .join(', ');
+      visited.delete(resolved);
       return `{ ${fields} }`;
     }
     case 'array':
-      return `Array<${typeToString(resolved.element)}>`;
+      return `Array<${typeToString(resolved.element, visited)}>`;
     case 'tuple': {
-      const elements = resolved.elements.map(typeToString).join(', ');
+      const elements = resolved.elements.map(e => typeToString(e, visited)).join(', ');
       return `(${elements})`;
     }
     case 'union':
-      return resolved.members.map(typeToString).join(' | ');
+      return resolved.members.map(m => typeToString(m, visited)).join(' | ');
     case 'adt': {
       if (resolved.typeArgs.length === 0) return resolved.name;
-      const args = resolved.typeArgs.map(typeToString).join(', ');
+      const args = resolved.typeArgs.map(a => typeToString(a, visited)).join(', ');
       return `${resolved.name}<${args}>`;
     }
     case 'generic':
@@ -592,7 +666,11 @@ export function typeToString(type: Type): string {
     case 'typevar':
       return `?T${resolved.id}`;
     case 'promise':
-      return `Promise<${typeToString(resolved.inner)}>`;
+      return `Promise<${typeToString(resolved.inner, visited)}>`;
+    case 'set':
+      return `Set<${typeToString(resolved.element, visited)}>`;
+    case 'map':
+      return `Map<${typeToString(resolved.key, visited)}, ${typeToString(resolved.value, visited)}>`;
   }
 }
 

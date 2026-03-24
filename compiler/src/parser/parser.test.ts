@@ -6,10 +6,11 @@ import type { Diagnostic } from '../diagnostics/diagnostic.js';
 import type {
   Program, Expression, Declaration, Statement, Pattern, TypeNode,
   LetDeclaration, TypeDeclaration, ImportDeclaration, ExportDeclaration,
+  ExtensionFunctionDeclaration,
   NumberLiteral, StringLiteral, BooleanLiteral, NullLiteral, Identifier,
   BinaryExpr, UnaryExpr, CallExpr, NewExpr, MemberExpr,
   IfExpr, MatchExpr, BlockExpr, ArrowFunction, TryCatchExpr,
-  ArrayExpr, RecordExpr, TemplateString,
+  ArrayExpr, RecordExpr, TemplateString, AwaitExpr,
   ForStatement, WhileStatement, AssignmentStatement, ThrowStatement,
   ReturnStatement, ExpressionStatement,
   LiteralPattern, VariantPattern, BindingPattern, WildcardPattern, RecordPattern, NullPattern,
@@ -349,11 +350,6 @@ describe('Expressions', () => {
     it('should parse a || b', () => {
       const expr = parseExpr('a || b') as BinaryExpr;
       expect(expr.operator).toBe('||');
-    });
-
-    it('should parse a |> b', () => {
-      const expr = parseExpr('a |> b') as BinaryExpr;
-      expect(expr.operator).toBe('|>');
     });
 
     it('should parse a != b', () => {
@@ -1416,5 +1412,243 @@ describe('record expression shorthand', () => {
     const { diagnostics } = parseSource(source);
     const errors = diagnostics.filter(d => d.severity === 'error');
     expect(errors.length).toBe(0);
+  });
+});
+
+// ── Async/Await ──────────────────────────────────────────────────────
+
+describe('Async/Await', () => {
+  it('should parse async arrow with expression body', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (x: number): Promise<number> => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.params).toHaveLength(1);
+    expect(fn.params[0].name.name).toBe('x');
+  });
+
+  it('should parse async arrow with block body', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (): Promise<void> => { 42 }');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.body.kind).toBe('BlockExpr');
+  });
+
+  it('should parse async generic function', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async <T>(x: T): Promise<T> => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.typeParams).toHaveLength(1);
+    expect(fn.typeParams![0].name.name).toBe('T');
+  });
+
+  it('should parse await expression', () => {
+    const expr = parseExpr('await p');
+    expect(expr.kind).toBe('AwaitExpr');
+    expect((expr as AwaitExpr).argument.kind).toBe('Identifier');
+  });
+
+  it('should parse await wrapping call + member access', () => {
+    const expr = parseExpr('await a.b()');
+    expect(expr.kind).toBe('AwaitExpr');
+    const arg = (expr as AwaitExpr).argument;
+    expect(arg.kind).toBe('CallExpr');
+  });
+
+  it('should parse let with async arrow initializer', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (): Promise<number> => 42');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.async).toBe(true);
+  });
+
+  it('should parse export let with async arrow initializer', () => {
+    const decl = parseFirst<ExportDeclaration>('export let f = async (): Promise<number> => 42');
+    expect(decl.kind).toBe('ExportDeclaration');
+    expect(decl.declaration).toBeDefined();
+    const letDecl = decl.declaration as LetDeclaration;
+    const fn = letDecl.initializer as ArrowFunction;
+    expect(fn.async).toBe(true);
+  });
+
+  it('should parse nested await await p', () => {
+    const expr = parseExpr('await await p');
+    expect(expr.kind).toBe('AwaitExpr');
+    const inner = (expr as AwaitExpr).argument;
+    expect(inner.kind).toBe('AwaitExpr');
+    expect((inner as AwaitExpr).argument.kind).toBe('Identifier');
+  });
+
+  it('should parse await with binary operator: await a + b', () => {
+    const expr = parseExpr('await a + b');
+    // await binds tighter than binary: (await a) + b
+    expect(expr.kind).toBe('BinaryExpr');
+    const bin = expr as BinaryExpr;
+    expect(bin.left.kind).toBe('AwaitExpr');
+    expect(bin.right.kind).toBe('Identifier');
+  });
+
+  it('should error when async not followed by ( or <', () => {
+    const { diagnostics } = parseSource('async 42');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('should error when let async is used as identifier', () => {
+    const { diagnostics } = parseSource('let async = 5');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('should parse non-async arrow without async flag', () => {
+    const decl = parseFirst<LetDeclaration>('let f = (x: number): number => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBeUndefined();
+  });
+});
+
+// ── Reserved Keywords as Member Names ─────────────────────────────────
+
+describe('Reserved keyword member access', () => {
+  it('should parse promise.catch(handler)', () => {
+    const expr = parseExpr('promise.catch(handler)') as CallExpr;
+    expect(expr.kind).toBe('CallExpr');
+    const callee = expr.callee as MemberExpr;
+    expect(callee.kind).toBe('MemberExpr');
+    expect(callee.property.name).toBe('catch');
+    expect((callee.object as Identifier).name).toBe('promise');
+  });
+
+  it('should parse map.delete(key)', () => {
+    const expr = parseExpr('map.delete(key)') as CallExpr;
+    expect(expr.kind).toBe('CallExpr');
+    const callee = expr.callee as MemberExpr;
+    expect(callee.kind).toBe('MemberExpr');
+    expect(callee.property.name).toBe('delete');
+  });
+
+  it('should parse obj.return', () => {
+    const expr = parseExpr('obj.return') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('return');
+  });
+
+  it('should parse obj.throw', () => {
+    const expr = parseExpr('obj.throw') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('throw');
+  });
+
+  it('should parse obj.for', () => {
+    const expr = parseExpr('obj.for') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('for');
+  });
+
+  it('should parse obj.new', () => {
+    const expr = parseExpr('obj.new') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('new');
+  });
+
+  it('should parse obj.import', () => {
+    const expr = parseExpr('obj.import') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('import');
+  });
+
+  it('should parse optional chaining with keyword: obj?.catch', () => {
+    const expr = parseExpr('obj?.catch') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('catch');
+    expect(expr.optional).toBe(true);
+  });
+
+  it('should parse chained keyword members: a.catch.then', () => {
+    const expr = parseExpr('a.catch.then') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('then');
+    const inner = expr.object as MemberExpr;
+    expect(inner.property.name).toBe('catch');
+  });
+
+  it('should parse all keywords in member position', () => {
+    const keywords = [
+      'let', 'mut', 'match', 'if', 'else', 'type',
+      'import', 'export', 'from', 'for', 'while',
+      'try', 'catch', 'throw', 'break', 'continue', 'return',
+      'in', 'true', 'false', 'null', 'new',
+      'fun', 'this', 'async', 'await',
+    ];
+    for (const kw of keywords) {
+      const expr = parseExpr(`obj.${kw}`) as MemberExpr;
+      expect(expr.kind).toBe('MemberExpr');
+      expect(expr.property.name).toBe(kw);
+    }
+  });
+
+  it('should parse keyword as record pattern field name', () => {
+    const src = 'match x { { catch: c } => c }';
+    const program = parseOk(src);
+    const stmt = program.body[0] as ExpressionStatement;
+    const matchExpr = stmt.expression as MatchExpr;
+    const arm = matchExpr.arms[0];
+    const pat = arm.pattern as RecordPattern;
+    expect(pat.fields[0].name.name).toBe('catch');
+  });
+
+  it('should parse keyword as record expression field name', () => {
+    const expr = parseExpr('{ catch: 42 }') as RecordExpr;
+    expect(expr.kind).toBe('RecordExpr');
+    expect(expr.fields[0].name.name).toBe('catch');
+  });
+
+  // ── Async Extension Functions ────────────────────────────────────────
+
+  describe('async extension functions', () => {
+    it('should parse async fun as async extension function', () => {
+      const program = parseOk('async fun string.fetch(): Promise<string> => this');
+      expect(program.body.length).toBe(1);
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.name.name).toBe('fetch');
+      const receiverType = decl.receiverType as NamedType;
+      expect(receiverType.name.name).toBe('string');
+    });
+
+    it('should parse async fun with block body', () => {
+      const program = parseOk('async fun string.fetch(): Promise<string> => {\n  this\n}');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.body.kind).toBe('BlockExpr');
+    });
+
+    it('should parse export async fun', () => {
+      const program = parseOk('export async fun string.fetch(): Promise<string> => this');
+      const exp = program.body[0] as ExportDeclaration;
+      expect(exp.kind).toBe('ExportDeclaration');
+      const decl = exp.declaration as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.exported).toBe(true);
+    });
+
+    it('should parse async fun with parameters', () => {
+      const program = parseOk('async fun string.fetch(url: string): Promise<string> => this');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.async).toBe(true);
+      expect(decl.params.length).toBe(1);
+      expect(decl.params[0].name.name).toBe('url');
+    });
+
+    it('non-async fun should not have async flag', () => {
+      const program = parseOk('fun string.upper(): string => this');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.async).toBeUndefined();
+    });
   });
 });

@@ -64,7 +64,8 @@ export type Declaration =
   | LetDeclaration
   | TypeDeclaration
   | ImportDeclaration
-  | ExportDeclaration;
+  | ExportDeclaration
+  | ExtensionFunctionDeclaration;
 
 /** All expression node types (produce a value). */
 export type Expression =
@@ -85,7 +86,9 @@ export type Expression =
   | TryCatchExpr
   | ArrayExpr
   | RecordExpr
-  | TemplateString;
+  | TemplateString
+  | ThisExpr
+  | AwaitExpr;
 
 /** Imperative statement node types (executed for side effects). */
 export type Statement =
@@ -229,11 +232,39 @@ export interface ImportSpecifier extends ASTNodeBase {
 export interface ExportDeclaration extends ASTNodeBase {
   readonly kind: 'ExportDeclaration';
   /** The inlined declaration being exported. */
-  readonly declaration?: LetDeclaration | TypeDeclaration;
+  readonly declaration?: LetDeclaration | TypeDeclaration | ExtensionFunctionDeclaration;
   /** Named export specifiers. */
   readonly specifiers?: readonly ExportSpecifier[];
   /** Re-export source module path. */
   readonly source?: StringLiteral;
+}
+
+/**
+ * Extension function declaration: `fun ReceiverType.method(params): ReturnType => body`.
+ *
+ * Adds a method to an existing type without modifying it. `this` refers to
+ * the receiver instance inside the body.
+ */
+export interface ExtensionFunctionDeclaration extends ASTNodeBase {
+  readonly kind: 'ExtensionFunctionDeclaration';
+  /** The type being extended (e.g., `string`, `Array<T>`, `User`). */
+  readonly receiverType: TypeNode;
+  /** The method name. */
+  readonly name: Identifier;
+  /** Generic type parameters on the extension (e.g., `<T>` in `fun <T> Array<T>.first()`). */
+  readonly typeParams?: readonly TypeParameter[];
+  /** Method parameters (excluding the implicit receiver). */
+  readonly params: readonly FunctionParam[];
+  /** Return type annotation (required for extension functions). */
+  readonly returnType: TypeNode;
+  /** The method body expression. */
+  readonly body: Expression;
+  /** Whether this extension is exported. */
+  readonly exported: boolean;
+  /** Whether this extension function is async (returns Promise<T>). */
+  readonly async?: boolean;
+  /** Resolved receiver type, set by the checker. */
+  resolvedReceiverType?: import('../checker/types.js').Type;
 }
 
 /** A single named export: `local` is the internal name, `exported` is the alias. */
@@ -295,7 +326,7 @@ export type BinaryOperator =
   | '+' | '-' | '*' | '/' | '%'
   | '==' | '!=' | '<' | '>' | '<=' | '>='
   | '&&' | '||'
-  | '??' | '|>';
+  | '??';
 
 /** Unary prefix expression: `!x` or `-x`. */
 export interface UnaryExpr extends ASTNodeBase {
@@ -340,6 +371,8 @@ export interface MemberExpr extends ASTNodeBase {
   readonly property: Identifier;
   /** `true` if this uses `?.` (optional chaining). */
   readonly optional: boolean;
+  /** Set by the checker when this member access resolves to an extension function call. */
+  extensionEmitName?: string;
 }
 
 /**
@@ -393,6 +426,8 @@ export interface BlockExpr extends ASTNodeBase {
 /** Arrow function: `(params) => body` or `<T>(params): ReturnType => body`. */
 export interface ArrowFunction extends ASTNodeBase {
   readonly kind: 'ArrowFunction';
+  /** Whether the function is declared with the `async` keyword. */
+  readonly async?: boolean;
   /** Generic type parameters for the function. */
   readonly typeParams?: readonly TypeParameter[];
   /** Function parameters with optional types and defaults. */
@@ -486,6 +521,17 @@ export interface TemplateExprPart {
   readonly expression: Expression;
   /** Source location of this interpolation (including `${}` delimiters). */
   readonly span: Span;
+}
+
+/** The `this` keyword expression — refers to the receiver inside an extension function. */
+export interface ThisExpr extends ASTNodeBase {
+  readonly kind: 'ThisExpr';
+}
+
+/** Await expression: `await expr`. Unwraps a `Promise<T>` to `T` inside an async function. */
+export interface AwaitExpr extends ASTNodeBase {
+  readonly kind: 'AwaitExpr';
+  readonly argument: Expression;
 }
 
 // ── Patterns ─────────────────────────────────────────────────────────
@@ -690,7 +736,8 @@ export interface ErrorNode extends ASTNodeBase {
  */
 export function isDeclaration(node: { kind: string }): node is Declaration {
   return node.kind === 'LetDeclaration' || node.kind === 'TypeDeclaration' ||
-    node.kind === 'ImportDeclaration' || node.kind === 'ExportDeclaration';
+    node.kind === 'ImportDeclaration' || node.kind === 'ExportDeclaration' ||
+    node.kind === 'ExtensionFunctionDeclaration';
 }
 
 /**

@@ -135,10 +135,11 @@ describe('TokenKind exhaustiveness', () => {
       'import', 'export', 'from', 'for', 'while',
       'try', 'catch', 'throw', 'break', 'continue', 'return',
       'in', 'true', 'false', 'null', 'new',
+      'fun', 'this', 'async', 'await',
     ];
     // If any of these aren't valid TokenKind values, TypeScript will error at compile time.
     // At runtime, just verify the array was constructed.
-    expect(keywords).toHaveLength(22);
+    expect(keywords).toHaveLength(26);
   });
 
   it('should include all expected operator kinds', () => {
@@ -149,9 +150,9 @@ describe('TokenKind exhaustiveness', () => {
       'AmpAmp', 'PipePipe', 'Bang',
       'QuestionDot', 'QuestionQuestion',
       'FatArrow', 'Equal',
-      'Pipe', 'PipeGreater',
+      'Pipe',
     ];
-    expect(operators).toHaveLength(20);
+    expect(operators).toHaveLength(19);
   });
 
   it('should include all expected punctuation kinds', () => {

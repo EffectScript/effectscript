@@ -97,8 +97,10 @@ export class TsTypeMapper implements TypeMapper {
       return null;
     }
 
+    const selected = this.selectOverload(constructSignatures);
+
     // Check for private constructor
-    const decl = constructSignatures[0].getDeclaration();
+    const decl = selected.getDeclaration();
     if (decl) {
       const modifiers = ts.getCombinedModifierFlags(decl as ts.Declaration);
       if (modifiers & ts.ModifierFlags.Private) {
@@ -110,13 +112,12 @@ export class TsTypeMapper implements TypeMapper {
       this.diagnostics.report({
         severity: 'warning',
         code: D.W302,
-        message: `Overloaded constructor has ${constructSignatures.length} signatures; using the first, ${constructSignatures.length - 1} dropped`,
+        message: `Overloaded constructor has ${constructSignatures.length} signatures; using the most general, ${constructSignatures.length - 1} dropped`,
         span: interopSpan,
       });
     }
 
-    const sig = constructSignatures[0];
-    return this.mapSignature(sig, checker);
+    return this.mapSignature(selected, checker);
   }
 
   /**
@@ -342,7 +343,7 @@ export class TsTypeMapper implements TypeMapper {
   private mapIntersection(tsType: ts.IntersectionType, checker: ts.TypeChecker): Type {
     const members = tsType.types;
     const fields = new Map<string, Type>();
-    let allObjects = true;
+    const nonRecordMembers: Type[] = [];
 
     for (const member of members) {
       const mapped = this.doMap(member, checker);
@@ -351,7 +352,19 @@ export class TsTypeMapper implements TypeMapper {
           fields.set(key, val);
         }
       } else {
-        allObjects = false;
+        nonRecordMembers.push(mapped);
+      }
+    }
+
+    const allObjects = nonRecordMembers.length === 0;
+
+    // Branded intersection detection: if we have non-record members AND
+    // all record fields are brand-like (prefixed with `_` or `__`), discard
+    // the brand fields and return the first non-record member as the base type.
+    if (!allObjects && fields.size > 0) {
+      const allBrand = Array.from(fields.keys()).every(k => k.startsWith('_'));
+      if (allBrand) {
+        return nonRecordMembers[0];
       }
     }
 
@@ -401,6 +414,21 @@ export class TsTypeMapper implements TypeMapper {
         return { kind: 'promise', inner };
       }
 
+      // Set / ReadonlySet
+      if (name === 'Set' || name === 'ReadonlySet') {
+        const typeArgs = checker.getTypeArguments(typeRef);
+        const element = typeArgs.length > 0 ? this.doMap(typeArgs[0], checker) : ANY;
+        return { kind: 'set', element };
+      }
+
+      // Map / ReadonlyMap
+      if (name === 'Map' || name === 'ReadonlyMap') {
+        const typeArgs = checker.getTypeArguments(typeRef);
+        const key = typeArgs.length > 0 ? this.doMap(typeArgs[0], checker) : ANY;
+        const value = typeArgs.length > 1 ? this.doMap(typeArgs[1], checker) : ANY;
+        return { kind: 'map', key, value };
+      }
+
       // ReadonlyArray
       if (name === 'ReadonlyArray') {
         const typeArgs = checker.getTypeArguments(typeRef);
@@ -423,11 +451,11 @@ export class TsTypeMapper implements TypeMapper {
         this.diagnostics.report({
           severity: 'warning',
           code: D.W302,
-          message: `Overloaded function has ${callSignatures.length} signatures; using the first, ${callSignatures.length - 1} dropped`,
+          message: `Overloaded function has ${callSignatures.length} signatures; using the most general, ${callSignatures.length - 1} dropped`,
           span: interopSpan,
         });
       }
-      return this.mapSignature(callSignatures[0], checker);
+      return this.mapSignature(this.selectOverload(callSignatures), checker);
     }
 
     // Map as record (class instances, interfaces, plain objects)
@@ -510,8 +538,50 @@ export class TsTypeMapper implements TypeMapper {
    * Handles parameter types, optionality, defaults, null-kind detection, return type,
    * and generic type parameters.
    */
+  /**
+   * Select the best overload from a list of signatures.
+   * Prefers the last overload that has type parameters; if none have type
+   * parameters, uses the absolute last (most general by TS convention).
+   */
+  private selectOverload(signatures: readonly ts.Signature[]): ts.Signature {
+    if (signatures.length === 1) return signatures[0];
+    // Prefer the last overload that has type parameters
+    for (let i = signatures.length - 1; i >= 0; i--) {
+      const typeParams = signatures[i].getTypeParameters();
+      if (typeParams && typeParams.length > 0) return signatures[i];
+    }
+    // No generic overloads — use the absolute last
+    return signatures[signatures.length - 1];
+  }
+
   private mapSignature(sig: ts.Signature, checker: ts.TypeChecker): FunctionType {
-    const params: ParamType[] = sig.getParameters().map(param => {
+    const allParams = sig.getParameters();
+    let restInfo: { name: string; elementType: Type } | undefined;
+
+    // Detect rest parameter (last param with dotDotDotToken)
+    if (allParams.length > 0) {
+      const lastParam = allParams[allParams.length - 1];
+      const lastDecl = lastParam.getDeclarations()?.[0];
+      if (lastDecl && ts.isParameter(lastDecl) && lastDecl.dotDotDotToken) {
+        // Rest parameter: extract element type from the array type
+        const restType = checker.getTypeOfSymbolAtLocation(lastParam, lastDecl);
+        let elementType: Type;
+        // Rest params in TS are always array types — extract the element
+        if (checker.isArrayType(restType)) {
+          const typeArgs = (restType as ts.TypeReference).typeArguments;
+          elementType = typeArgs && typeArgs.length > 0
+            ? this.doMap(typeArgs[0], checker)
+            : { kind: 'any' };
+        } else {
+          elementType = this.doMap(restType, checker);
+        }
+        restInfo = { name: lastParam.getName(), elementType };
+      }
+    }
+
+    // Map non-rest params (exclude last if it's a rest param)
+    const paramSymbols = restInfo ? allParams.slice(0, -1) : allParams;
+    const params: ParamType[] = paramSymbols.map(param => {
       const declarations = param.getDeclarations();
       const decl = declarations?.[0];
       let paramType: ts.Type;
@@ -522,23 +592,26 @@ export class TsTypeMapper implements TypeMapper {
       }
       const mapped = this.doMap(paramType, checker);
 
-      const isOptional = !!(param.flags & ts.SymbolFlags.Optional);
+      // Detect optionality: SymbolFlags.Optional covers object properties,
+      // but for function params we also check the declaration's questionToken.
+      let isOptional = !!(param.flags & ts.SymbolFlags.Optional);
       let hasDefault = false;
       if (decl && ts.isParameter(decl)) {
+        if (decl.questionToken) isOptional = true;
         hasDefault = decl.initializer !== undefined;
       }
 
       // Determine nullKind for interop null/undefined handling
       const nullKind = this.detectNullKind(paramType, isOptional, checker);
 
-      const result: Record<string, unknown> = {
+      const pResult: Record<string, unknown> = {
         name: param.getName(),
         type: mapped,
         optional: isOptional,
         hasDefault,
       };
-      if (nullKind !== undefined) result['nullKind'] = nullKind;
-      return result as unknown as ParamType;
+      if (nullKind !== undefined) pResult['nullKind'] = nullKind;
+      return pResult as unknown as ParamType;
     });
 
     const returnType = this.doMap(sig.getReturnType(), checker);
@@ -555,6 +628,9 @@ export class TsTypeMapper implements TypeMapper {
         name: tp.getSymbol()?.getName() ?? 'T',
       }));
       result['typeParams'] = typeParams;
+    }
+    if (restInfo) {
+      result['rest'] = restInfo;
     }
 
     return result as unknown as FunctionType;

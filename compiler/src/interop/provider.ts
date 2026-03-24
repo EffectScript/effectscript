@@ -7,7 +7,7 @@
  * used by the checker when an `import` references an external module.
  */
 import * as ts from 'typescript';
-import type { Type, FunctionType, ExportedTypeSignature } from '../checker/types.js';
+import type { Type, RecordType, FunctionType, ExportedTypeSignature } from '../checker/types.js';
 import type { DiagnosticCollector } from '../diagnostics/collector.js';
 import type { FileSystem } from '../filesystem.js';
 import { InMemoryDeclarationCache } from './cache.js';
@@ -75,6 +75,7 @@ const EMPTY_SIGNATURE: ExportedTypeSignature = {
   types: new Map(),
   values: new Map(),
   adtConstructors: new Map(),
+  extensions: new Map(),
 };
 
 // ── Implementation ──────────────────────────────────────────
@@ -136,7 +137,7 @@ export class TsCompilerApiProvider implements TypeDeclarationProvider {
       );
     }
 
-    const signature: ExportedTypeSignature = { types, values, adtConstructors };
+    const signature: ExportedTypeSignature = { types, values, adtConstructors, extensions: new Map() };
     this.cache.set(modulePath, signature);
     return signature;
   }
@@ -195,7 +196,19 @@ export class TsCompilerApiProvider implements TypeDeclarationProvider {
     values: Map<string, Type>,
     adtConstructors: Map<string, FunctionType>,
   ): void {
-    const flags = sym.flags;
+    // Resolve alias symbols to their target before checking flags.
+    // Re-exports (`export { X } from "..."`) produce alias symbols whose flags
+    // don't include the target's category flags (TypeAlias, Class, etc.).
+    let resolved = sym;
+    if (sym.flags & ts.SymbolFlags.Alias) {
+      try {
+        resolved = extracted.typeChecker.getAliasedSymbol(sym);
+      } catch {
+        // getAliasedSymbol may throw for broken alias chains — fall back to original
+        resolved = sym;
+      }
+    }
+    const flags = resolved.flags;
     const sourceFile = extracted.program.getSourceFile(
       Array.from(extracted.exports.values())[0]
         ? (extracted.program.getRootFileNames()[0] ?? '')
@@ -204,7 +217,7 @@ export class TsCompilerApiProvider implements TypeDeclarationProvider {
 
     // Type alias → types map
     if (flags & ts.SymbolFlags.TypeAlias) {
-      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(sym);
+      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(resolved);
       const mapped = this.mapper.mapType(declaredType, extracted.typeChecker);
       types.set(name, mapped);
       return;
@@ -212,22 +225,43 @@ export class TsCompilerApiProvider implements TypeDeclarationProvider {
 
     // Interface → types map
     if ((flags & ts.SymbolFlags.Interface) && !(flags & ts.SymbolFlags.Class)) {
-      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(sym);
+      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(resolved);
       const mapped = this.mapper.mapType(declaredType, extracted.typeChecker);
       types.set(name, mapped);
       return;
     }
 
-    // Class → values (instance type) + adtConstructors (constructor)
+    // Class → values (static side as record) + adtConstructors (constructor)
     if (flags & ts.SymbolFlags.Class) {
       const symType = extracted.typeChecker.getTypeOfSymbolAtLocation(
-        sym, sourceFile ?? ({} as ts.Node),
+        resolved, sourceFile ?? ({} as ts.Node),
       );
 
-      // Instance type for values
-      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(sym);
-      const instanceMapped = this.mapper.mapType(declaredType, extracted.typeChecker);
-      values.set(name, instanceMapped);
+      // Extract static members as a record type.
+      // `getTypeOfSymbolAtLocation` returns the constructor/static type,
+      // whose properties include static methods and fields.
+      const staticFields = new Map<string, Type>();
+      const staticProps = symType.getProperties();
+      for (const prop of staticProps) {
+        const propName = prop.getName();
+        // Skip prototype and internal symbols
+        if (propName === 'prototype' || propName.startsWith('__')) continue;
+        const propDecls = prop.getDeclarations();
+        const propDecl = propDecls?.[0];
+        if (propDecl) {
+          const propType = extracted.typeChecker.getTypeOfSymbolAtLocation(prop, propDecl);
+          staticFields.set(propName, this.mapper.mapType(propType, extracted.typeChecker));
+        }
+      }
+
+      // If there are static members, use a record type; otherwise fall back to instance type
+      if (staticFields.size > 0) {
+        values.set(name, { kind: 'record', fields: staticFields } as RecordType);
+      } else {
+        const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(resolved);
+        const instanceMapped = this.mapper.mapType(declaredType, extracted.typeChecker);
+        values.set(name, instanceMapped);
+      }
 
       // Constructor for adtConstructors
       const ctor = this.mapper.mapConstructor(symType, extracted.typeChecker);
@@ -237,17 +271,28 @@ export class TsCompilerApiProvider implements TypeDeclarationProvider {
       return;
     }
 
-    // Enum → values map (map the declared type to get the enum's primitive equivalent)
+    // Enum → values map: create a record type with member names as fields.
+    // This enables `Direction.Up` access on enum values.
     if (flags & ts.SymbolFlags.Enum) {
-      const declaredType = extracted.typeChecker.getDeclaredTypeOfSymbol(sym);
-      const mapped = this.mapper.mapType(declaredType, extracted.typeChecker);
-      values.set(name, mapped);
+      const fields = new Map<string, Type>();
+      const enumMembers = resolved.exports;
+      if (enumMembers) {
+        enumMembers.forEach((memberSym, memberName) => {
+          const mName = memberName as string;
+          if (mName.startsWith('__')) return; // Skip internal symbols
+          const memberType = extracted.typeChecker.getTypeOfSymbolAtLocation(
+            memberSym, sourceFile ?? ({} as ts.Node),
+          );
+          fields.set(mName, this.mapper.mapType(memberType, extracted.typeChecker));
+        });
+      }
+      values.set(name, { kind: 'record', fields } as RecordType);
       return;
     }
 
     // Everything else (functions, variables, etc.) → values map
     const symType = extracted.typeChecker.getTypeOfSymbolAtLocation(
-      sym, sourceFile ?? ({} as ts.Node),
+      resolved, sourceFile ?? ({} as ts.Node),
     );
     const mapped = this.mapper.mapType(symType, extracted.typeChecker);
     values.set(name, mapped);

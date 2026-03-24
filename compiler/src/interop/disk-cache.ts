@@ -15,7 +15,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import type { ExportedTypeSignature, FunctionType, Type } from '../checker/types.js';
+import type { ExportedTypeSignature, ExportedExtension, FunctionType, Type } from '../checker/types.js';
 import type { RecordType, ADTType } from '../checker/types.js';
 import { InMemoryDeclarationCache } from './cache.js';
 import type { DeclarationCache, CacheStats } from './cache.js';
@@ -49,6 +49,12 @@ export function serializeSignature(sig: ExportedTypeSignature): string {
     types: mapToRecord(sig.types, serializeType),
     values: mapToRecord(sig.values, serializeType),
     adtConstructors: mapToRecord(sig.adtConstructors, serializeType),
+    extensions: mapToRecord(sig.extensions, (ext) => ({
+      receiverType: serializeType(ext.receiverType),
+      methodName: ext.methodName,
+      fnType: serializeType(ext.fnType),
+      emitName: ext.emitName,
+    })),
   };
   return JSON.stringify(obj);
 }
@@ -62,11 +68,23 @@ export function deserializeSignature(json: string): ExportedTypeSignature {
     types: Record<string, unknown>;
     values: Record<string, unknown>;
     adtConstructors: Record<string, unknown>;
+    extensions?: Record<string, unknown>;
   };
   return {
     types: recordToMap(obj.types, deserializeType),
     values: recordToMap(obj.values, deserializeType),
     adtConstructors: recordToMap(obj.adtConstructors, deserializeType) as ReadonlyMap<string, FunctionType>,
+    extensions: obj.extensions
+      ? recordToMap(obj.extensions, (raw) => {
+          const e = raw as { receiverType: unknown; methodName: string; fnType: unknown; emitName: string };
+          return {
+            receiverType: deserializeType(e.receiverType),
+            methodName: e.methodName,
+            fnType: deserializeType(e.fnType) as FunctionType,
+            emitName: e.emitName,
+          } as ExportedExtension;
+        })
+      : new Map(),
   };
 }
 

@@ -425,6 +425,13 @@ describe('types.ts', () => {
       expect(typeToString(fnType([param('a', num), param('b', str)], bool))).toBe('(number, string) => boolean');
     });
 
+    it('function with rest params', () => {
+      const fn: FunctionType = { kind: 'function', params: [param('msg', str)], returnType: voidT, rest: { name: 'args', elementType: str } };
+      expect(typeToString(fn)).toBe('(string, ...string[]) => void');
+      const restOnly: FunctionType = { kind: 'function', params: [], returnType: num, rest: { name: 'nums', elementType: num } };
+      expect(typeToString(restOnly)).toBe('(...number[]) => number');
+    });
+
     it('record', () => {
       const result = typeToString(record({ name: str, age: num }));
       expect(result).toBe('{ name: string, age: number }');
@@ -464,6 +471,65 @@ describe('types.ts', () => {
       const tv = freshTypeVar();
       tv.resolved = num;
       expect(typeToString(tv)).toBe('number');
+    });
+
+    it('self-referential record type does not stack overflow', () => {
+      // Simulate: interface Node { value: string; next: Node }
+      const fields = new Map<string, Type>();
+      const selfRef: RecordType = { kind: 'record', fields };
+      fields.set('value', str);
+      fields.set('next', selfRef);
+      // Should terminate and contain <recursive> for the cycle
+      const result = typeToString(selfRef);
+      expect(result).toContain('value: string');
+      expect(result).toContain('<recursive>');
+    });
+
+    it('mutually recursive types (A→B→A) terminate', () => {
+      // Simulate: interface A { b: B }, interface B { a: A }
+      const fieldsA = new Map<string, Type>();
+      const fieldsB = new Map<string, Type>();
+      const typeA: RecordType = { kind: 'record', fields: fieldsA };
+      const typeB: RecordType = { kind: 'record', fields: fieldsB };
+      fieldsA.set('b', typeB);
+      fieldsB.set('a', typeA);
+      const result = typeToString(typeA);
+      expect(result).toContain('<recursive>');
+    });
+
+    it('deeply nested type (20+ levels) terminates', () => {
+      // Build a chain of nested records: { inner: { inner: { ... } } }
+      let current: Type = str;
+      for (let i = 0; i < 50; i++) {
+        current = { kind: 'record', fields: new Map([['inner', current]]) };
+      }
+      // Should terminate without stack overflow — and no false-positive cycle detection
+      const result = typeToString(current);
+      expect(result).toBeDefined();
+      expect(typeof result).toBe('string');
+      expect(result).not.toContain('<recursive>');
+    });
+
+    it('self-referential function param does not stack overflow', () => {
+      // Simulate: (self: RecordWithSelf) => void where RecordWithSelf has method returning itself
+      const fields = new Map<string, Type>();
+      const selfRecord: RecordType = { kind: 'record', fields };
+      const selfFn: FunctionType = {
+        kind: 'function',
+        params: [{ name: 'self', type: selfRecord, optional: false, hasDefault: false }],
+        returnType: selfRecord,
+      };
+      fields.set('method', selfFn);
+      const result = typeToString(selfRecord);
+      expect(result).toContain('<recursive>');
+    });
+
+    it('set type', () => {
+      expect(typeToString({ kind: 'set', element: num })).toBe('Set<number>');
+    });
+
+    it('map type', () => {
+      expect(typeToString({ kind: 'map', key: str, value: num })).toBe('Map<string, number>');
     });
   });
 

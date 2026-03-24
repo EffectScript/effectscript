@@ -723,7 +723,7 @@ class Lexer {
     return { kind: 'Error', text: '&', span };
   }
 
-  /** Read `|`, `||`, or `|>` (union/ADT separator, logical or, pipe operator). */
+  /** Read `|` or `||` (union/ADT separator, logical or). */
   private readPipe(): Omit<Token, 'leadingTrivia' | 'trailingTrivia'> {
     const start = this.currentPosition();
     this.pos++;
@@ -732,11 +732,6 @@ class Lexer {
       this.pos++;
       this.column++;
       return { kind: 'PipePipe', text: '||', span: this.makeSpan(start, this.currentPosition()) };
-    }
-    if (this.peek() === '>') {
-      this.pos++;
-      this.column++;
-      return { kind: 'PipeGreater', text: '|>', span: this.makeSpan(start, this.currentPosition()) };
     }
     return { kind: 'Pipe', text: '|', span: this.makeSpan(start, this.currentPosition()) };
   }

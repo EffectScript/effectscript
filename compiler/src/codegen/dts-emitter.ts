@@ -15,12 +15,14 @@
 
 import type {
   Program, LetDeclaration, TypeDeclaration,
-  ExportDeclaration, Declaration, Statement,
+  ExportDeclaration, ExtensionFunctionDeclaration,
+  Declaration, Statement,
 } from '../parser/ast.js';
 import type {
   Type, FunctionType, ADTType, RecordType,
   NullableType, ArrayType, TupleType, UnionType,
   PromiseType, GenericType, PrimitiveType,
+  SetType, MapType,
 } from '../checker/types.js';
 import { resolveType } from '../checker/types.js';
 import { rewriteImportPath } from '../utils/constants.js';
@@ -74,6 +76,12 @@ function typeToTsString(type: Type): string {
       return 'any';
     case 'promise':
       return `Promise<${typeToTsString((resolved as PromiseType).inner)}>`;
+    case 'set':
+      return `Set<${typeToTsString((resolved as SetType).element)}>`;
+    case 'map': {
+      const mt = resolved as MapType;
+      return `Map<${typeToTsString(mt.key)}, ${typeToTsString(mt.value)}>`;
+    }
   }
 }
 
@@ -130,6 +138,11 @@ function emitTopLevel(lines: string[], node: Declaration | Statement): void {
         emitTypeDTS(lines, node);
       }
       break;
+    case 'ExtensionFunctionDeclaration':
+      if (node.exported) {
+        emitExtensionDTS(lines, node);
+      }
+      break;
     case 'ExportDeclaration':
       emitExportDTS(lines, node);
       break;
@@ -155,6 +168,41 @@ function emitLetDTS(lines: string[], node: LetDeclaration): void {
   } else {
     lines.push(`export declare ${keyword} ${node.name.name}: ${typeToTsString(resolved)};`);
   }
+}
+
+// ── Extension Function Declaration ────────────────────────
+
+/** Emit an extension function as `export declare const Type_method: (__this: ReceiverType, ...params) => ReturnType;`. */
+function emitExtensionDTS(lines: string[], node: ExtensionFunctionDeclaration): void {
+  const type = node.resolvedType;
+  if (type === undefined) return;
+
+  const resolved = resolveType(type);
+  if (resolved.kind !== 'function') return;
+
+  const ft = resolved as FunctionType;
+  const receiverTypeName = getReceiverTypeName(node.receiverType);
+  const emitName = `${receiverTypeName}_${node.name.name}`;
+
+  const typeParams = ft.typeParams && ft.typeParams.length > 0
+    ? `<${ft.typeParams.map(tp => tp.name).join(', ')}>`
+    : '';
+
+  const receiverTypeStr = node.resolvedReceiverType !== undefined
+    ? typeToTsString(node.resolvedReceiverType)
+    : receiverTypeName;
+
+  const params = [`__this: ${receiverTypeStr}`, ...ft.params.map(p => `${p.name}: ${typeToTsString(p.type)}`)];
+  lines.push(`export declare const ${emitName}: ${typeParams}(${params.join(', ')}) => ${typeToTsString(ft.returnType)};`);
+}
+
+/** Extract the receiver type name from a TypeNode. */
+function getReceiverTypeName(typeNode: unknown): string {
+  const node = typeNode as { kind: string; name?: { name: string } };
+  if (node.kind === 'NamedType' && node.name) {
+    return node.name.name;
+  }
+  return 'unknown';
 }
 
 // ── Type Declaration (ADT) ─────────────────────────────────
@@ -314,6 +362,12 @@ function typeUsesGeneric(type: Type, name: string): boolean {
       return (resolved as ADTType).typeArgs.some(a => typeUsesGeneric(a, name));
     case 'promise':
       return typeUsesGeneric((resolved as PromiseType).inner, name);
+    case 'set':
+      return typeUsesGeneric((resolved as SetType).element, name);
+    case 'map': {
+      const mt = resolved as MapType;
+      return typeUsesGeneric(mt.key, name) || typeUsesGeneric(mt.value, name);
+    }
     default:
       return false;
   }
@@ -355,6 +409,8 @@ function emitExportDTS(lines: string[], node: ExportDeclaration): void {
       emitLetDTS(lines, node.declaration);
     } else if (node.declaration.kind === 'TypeDeclaration' && node.declaration.exported) {
       emitTypeDTS(lines, node.declaration);
+    } else if (node.declaration.kind === 'ExtensionFunctionDeclaration' && node.declaration.exported) {
+      emitExtensionDTS(lines, node.declaration as ExtensionFunctionDeclaration);
     }
     return;
   }

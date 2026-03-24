@@ -3,10 +3,11 @@ import { emitJS } from './js-emitter.js';
 import type {
   Program, LetDeclaration, TypeDeclaration, VariantDeclaration,
   ImportDeclaration, ExportDeclaration, ExportSpecifier,
+  ExtensionFunctionDeclaration,
   NumberLiteral, StringLiteral, BooleanLiteral, NullLiteral,
   Identifier, BinaryExpr, UnaryExpr, CallExpr, NewExpr,
   MemberExpr, IfExpr, MatchExpr, MatchArm, BlockExpr,
-  ArrowFunction, FunctionParam, TryCatchExpr,
+  ArrowFunction, FunctionParam, TryCatchExpr, AwaitExpr,
   ArrayExpr, RecordExpr, RecordField, TemplateString,
   ForStatement, WhileStatement, AssignmentStatement,
   ThrowStatement, BreakStatement, ContinueStatement, ReturnStatement,
@@ -15,6 +16,7 @@ import type {
   NullPattern, RecordPattern,
   Expression, Declaration, Statement,
   RecordType as RecordTypeNode, RecordTypeField,
+  NamedType,
 } from '../parser/ast.js';
 import type { Span } from '../utils/span.js';
 import type { ADTType, Type, FunctionType as FT, ParamType } from '../checker/types.js';
@@ -413,12 +415,6 @@ describe('JS Emitter', () => {
   it('emits arithmetic operators as-is', () => {
     const ast = program(exprStmt(binary('+', id('a'), id('b'))));
     expect(emitJS(ast)).toBe('a + b;\n');
-  });
-
-  // ── 8. Pipe operator |> → nested calls ──
-  it('emits pipe operator as nested function calls', () => {
-    const ast = program(exprStmt(binary('|>', binary('|>', id('x'), id('f')), id('g'))));
-    expect(emitJS(ast)).toBe('g(f(x));\n');
   });
 
   // ── 9. Unary operators passthrough ──
@@ -1239,5 +1235,285 @@ describe('JS Emitter', () => {
     const ast = program(exprStmt(call as unknown as Expression));
     const js = emitJS(ast);
     expect(js).toContain('myFn(null)');
+  });
+});
+
+// ── Async/Await Emission ──────────────────────────────────────────
+
+describe('Async/Await emission', () => {
+  function asyncArrow(params: FunctionParam[], body: Expression): ArrowFunction {
+    const node: Record<string, unknown> = { kind: 'ArrowFunction', async: true, params, body, span };
+    return node as unknown as ArrowFunction;
+  }
+
+  function awaitExpr(argument: Expression): AwaitExpr {
+    return { kind: 'AwaitExpr', argument, span };
+  }
+
+  it('emits async arrow with expression body', () => {
+    const fn = asyncArrow([param('x')], id('x'));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('async (x) => x');
+  });
+
+  it('emits await expression', () => {
+    const fn = asyncArrow([param('x')], awaitExpr(call(id('compute'), [id('x')])));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('await compute(x)');
+  });
+
+  it('emits async arrow with block body', () => {
+    const fn = asyncArrow([], block(
+      letDecl('x', num(42)),
+      id('x'),
+    ));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('async () => {');
+    expect(js).toContain('return x;');
+  });
+
+  it('emits async-aware IIFE for match expression', () => {
+    const matchNode = matchExpr(id('r'), [
+      matchArm({ kind: 'WildcardPattern', span }, awaitExpr(call(id('compute'), []))),
+    ], true);
+    const fn = asyncArrow([], matchNode);
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('await (async () =>');
+  });
+
+  it('emits async-aware IIFE for block expression', () => {
+    const blockNode = block(
+      letDecl('y', awaitExpr(call(id('compute'), []))),
+      id('y'),
+    );
+    // Block expr in expression position — wraps in IIFE when it's the body of an async arrow
+    // that has something before the block
+    const fn = asyncArrow([], block(
+      letDecl('x', blockNode),
+      id('x'),
+    ));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('await (async () =>');
+  });
+
+  it('emits async-aware IIFE for try/catch expression', () => {
+    const tryNode = tryCatch(
+      block(awaitExpr(call(id('fetchData'), []))),
+      'e',
+      block(str('fallback')),
+    );
+    const fn = asyncArrow([], block(
+      letDecl('result', tryNode),
+      id('result'),
+    ));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('await (async () =>');
+  });
+
+  it('emits sync IIFE when not in async context', () => {
+    const matchNode = matchExpr(id('r'), [
+      matchArm({ kind: 'WildcardPattern', span }, num(42)),
+    ], true);
+    const fn = arrow([], matchNode);
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    // Should NOT contain async IIFE
+    expect(js).not.toContain('await (async');
+    expect(js).toContain('(() =>');
+  });
+
+  it('nested non-async function inside async: inner IIFEs stay synchronous', () => {
+    const innerMatch = matchExpr(id('r'), [
+      matchArm({ kind: 'WildcardPattern', span }, num(42)),
+    ], true);
+    const innerFn = arrow([param('r')], innerMatch);
+    const fn = asyncArrow([], block(
+      letDecl('inner', innerFn),
+      call(id('inner'), [id('x')]),
+    ));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    // The inner non-async function's IIFE should be sync
+    expect(js).toContain('(() =>');
+  });
+
+  it('emits __attempt_async when isAsyncAttempt tag is set', () => {
+    const attemptCall: Record<string, unknown> = {
+      kind: 'CallExpr',
+      callee: id('attempt'),
+      args: [asyncArrow([], str('hello'))],
+      span,
+    };
+    // Tag the call as async attempt (emitter reads this tag)
+    attemptCall['isAsyncAttempt'] = true;
+    // Also set resolvedType on callee to mark it as prelude attempt
+    const callee = id('attempt');
+    (callee as unknown as Record<string, unknown>)['resolvedType'] = { kind: 'function', params: [], returnType: { kind: 'adt', name: 'Result', typeArgs: [], variants: [] } };
+    attemptCall['callee'] = callee;
+
+    const fn = asyncArrow([], attemptCall as unknown as Expression);
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).toContain('__attempt_async');
+  });
+
+  it('does not emit __attempt_async when not tagged', () => {
+    const callee = id('attempt');
+    (callee as unknown as Record<string, unknown>)['resolvedType'] = { kind: 'function', params: [], returnType: { kind: 'adt', name: 'Result', typeArgs: [], variants: [] } };
+    const attemptCall = call(callee, [arrow([], str('hello'))]);
+    const ast = program(letDecl('f', arrow([], attemptCall)));
+    const js = emitJS(ast);
+    expect(js).not.toContain('__attempt_async');
+  });
+
+  it('non-async arrow does not emit async keyword', () => {
+    const fn = arrow([param('x')], id('x'));
+    const ast = program(letDecl('f', fn));
+    const js = emitJS(ast);
+    expect(js).not.toContain('async');
+  });
+
+  // ── Extension Function Declaration Emission ──────────────────────────
+
+  describe('extension function declarations', () => {
+    function namedType(name: string): NamedType {
+      return { kind: 'NamedType', name: id(name), span } as NamedType;
+    }
+
+    function extFunDecl(
+      receiverTypeName: string,
+      methodName: string,
+      params: FunctionParam[],
+      body: Expression,
+      opts?: { exported?: boolean; async?: boolean },
+    ): ExtensionFunctionDeclaration {
+      const result: Record<string, unknown> = {
+        kind: 'ExtensionFunctionDeclaration',
+        receiverType: namedType(receiverTypeName),
+        name: id(methodName),
+        params,
+        returnType: namedType('string'),
+        body,
+        exported: opts?.exported ?? false,
+        span,
+      };
+      if (opts?.async) result['async'] = true;
+      return result as unknown as ExtensionFunctionDeclaration;
+    }
+
+    function thisExpr(): Expression {
+      return { kind: 'ThisExpr', span } as Expression;
+    }
+
+    it('emits extension function as const with __this', () => {
+      const decl = extFunDecl('string', 'shout', [], binary('+', thisExpr(), str('!')));
+      const js = emitJS(program(decl));
+      expect(js).toContain('const string_shout = (__this) => __this + "!";');
+    });
+
+    it('emits extension function with parameters', () => {
+      const decl = extFunDecl('number', 'add', [param('x')], binary('+', thisExpr(), id('x')));
+      const js = emitJS(program(decl));
+      expect(js).toContain('const number_add = (__this, x) => __this + x;');
+    });
+
+    it('emits exported extension function', () => {
+      const decl = extFunDecl('string', 'shout', [], thisExpr(), { exported: true });
+      const js = emitJS(program(decl));
+      expect(js).toContain('export const string_shout = (__this) => __this;');
+    });
+
+    it('emits extension function with block body', () => {
+      const decl = extFunDecl('string', 'rev', [], block(
+        letDecl('x', thisExpr()),
+        id('x'),
+      ));
+      const js = emitJS(program(decl));
+      expect(js).toContain('const string_rev = (__this) => {');
+      expect(js).toContain('const x = __this;');
+      expect(js).toContain('return x;');
+    });
+
+    it('emits async extension function with async prefix', () => {
+      const decl = extFunDecl('string', 'fetch', [], thisExpr(), { async: true });
+      const js = emitJS(program(decl));
+      expect(js).toContain('const string_fetch = async (__this) => __this;');
+    });
+
+    it('emits async extension function with block body', () => {
+      const awaitNode: AwaitExpr = { kind: 'AwaitExpr', argument: call(id('fetchData'), []), span };
+      const decl = extFunDecl('string', 'fetchInfo', [], block(
+        letDecl('data', awaitNode),
+        id('data'),
+      ), { async: true });
+      const js = emitJS(program(decl));
+      expect(js).toContain('const string_fetchInfo = async (__this) => {');
+      expect(js).toContain('await fetchData()');
+    });
+
+    it('emits exported async extension function', () => {
+      const decl = extFunDecl('string', 'fetch', [], thisExpr(), { exported: true, async: true });
+      const js = emitJS(program(decl));
+      expect(js).toContain('export const string_fetch = async (__this) => __this;');
+    });
+
+    it('non-async extension function does not emit async', () => {
+      const decl = extFunDecl('string', 'shout', [], thisExpr());
+      const js = emitJS(program(decl));
+      expect(js).not.toContain('async');
+    });
+  });
+
+  // ── Extension Function Call Emission ─────────────────────────────────
+
+  describe('extension function calls', () => {
+    function memberWithExt(object: Expression, property: string, emitName: string, optional = false): MemberExpr {
+      const node = member(object, property, optional);
+      node.extensionEmitName = emitName;
+      return node;
+    }
+
+    it('emits non-optional extension call as static function', () => {
+      const callee = memberWithExt(str('hello'), 'shout', 'string_shout');
+      const ast = program(exprStmt(call(callee, [])));
+      const js = emitJS(ast);
+      expect(js).toContain('string_shout("hello")');
+    });
+
+    it('emits extension call with arguments', () => {
+      const callee = memberWithExt(num(5), 'add', 'number_add');
+      const ast = program(exprStmt(call(callee, [num(3)])));
+      const js = emitJS(ast);
+      expect(js).toContain('number_add(5, 3)');
+    });
+
+    it('emits optional chaining on simple receiver as ternary', () => {
+      const callee = memberWithExt(id('x'), 'shout', 'string_shout', true);
+      const ast = program(exprStmt(call(callee, [])));
+      const js = emitJS(ast);
+      expect(js).toContain('x == null ? undefined : string_shout(x)');
+    });
+
+    it('emits optional chaining on complex receiver with temp var', () => {
+      const callee = memberWithExt(call(id('getString'), []), 'shout', 'string_shout', true);
+      const ast = program(exprStmt(call(callee, [])));
+      const js = emitJS(ast);
+      expect(js).toContain('let __ext_r0;');
+      expect(js).toContain('((__ext_r0 = getString()) == null ? undefined : string_shout(__ext_r0))');
+    });
+
+    it('emits await on extension call as await static_call(receiver)', () => {
+      const callee = memberWithExt(str('https://example.com'), 'fetchContent', 'string_fetchContent');
+      const awaitNode: AwaitExpr = { kind: 'AwaitExpr', argument: call(callee, []), span };
+      const ast = program(exprStmt(awaitNode));
+      const js = emitJS(ast);
+      expect(js).toContain('await string_fetchContent("https://example.com")');
+    });
   });
 });

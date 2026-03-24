@@ -28,9 +28,11 @@
 import type {
   ASTNodeBase, Program,
   Declaration, LetDeclaration, TypeDeclaration, ImportDeclaration, ExportDeclaration,
+  ExtensionFunctionDeclaration,
   Expression, NumberLiteral, StringLiteral, BooleanLiteral, NullLiteral, Identifier,
   BinaryExpr, UnaryExpr, CallExpr, NewExpr, MemberExpr, IfExpr, MatchExpr,
-  BlockExpr, ArrowFunction, TryCatchExpr, ArrayExpr, RecordExpr, TemplateString,
+  BlockExpr, ArrowFunction, TryCatchExpr, ArrayExpr, RecordExpr, TemplateString, AwaitExpr,
+  ThisExpr,
   Statement, ForStatement, WhileStatement, AssignmentStatement, ThrowStatement,
   BreakStatement, ContinueStatement, ReturnStatement, ExpressionStatement,
   Pattern, LiteralPattern, VariantPattern, RecordPattern, WildcardPattern,
@@ -88,6 +90,8 @@ export interface ASTVisitor {
   leaveImportDeclaration?(node: ImportDeclaration, context: VisitorContext): void;
   enterExportDeclaration?(node: ExportDeclaration, context: VisitorContext): void;
   leaveExportDeclaration?(node: ExportDeclaration, context: VisitorContext): void;
+  enterExtensionFunctionDeclaration?(node: ExtensionFunctionDeclaration, context: VisitorContext): void;
+  leaveExtensionFunctionDeclaration?(node: ExtensionFunctionDeclaration, context: VisitorContext): void;
 
   // ── Per-kind: Expressions ──────────────────────────────────
   enterNumberLiteral?(node: NumberLiteral, context: VisitorContext): void;
@@ -126,6 +130,10 @@ export interface ASTVisitor {
   leaveRecordExpr?(node: RecordExpr, context: VisitorContext): void;
   enterTemplateString?(node: TemplateString, context: VisitorContext): void;
   leaveTemplateString?(node: TemplateString, context: VisitorContext): void;
+  enterAwaitExpr?(node: AwaitExpr, context: VisitorContext): void;
+  leaveAwaitExpr?(node: AwaitExpr, context: VisitorContext): void;
+  enterThisExpr?(node: ThisExpr, context: VisitorContext): void;
+  leaveThisExpr?(node: ThisExpr, context: VisitorContext): void;
 
   // ── Per-kind: Statements ───────────────────────────────────
   enterForStatement?(node: ForStatement, context: VisitorContext): void;
@@ -211,6 +219,7 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   TypeDeclaration: 'Declaration',
   ImportDeclaration: 'Declaration',
   ExportDeclaration: 'Declaration',
+  ExtensionFunctionDeclaration: 'Declaration',
   // Expressions
   NumberLiteral: 'Expression',
   StringLiteral: 'Expression',
@@ -230,6 +239,8 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   ArrayExpr: 'Expression',
   RecordExpr: 'Expression',
   TemplateString: 'Expression',
+  AwaitExpr: 'Expression',
+  ThisExpr: 'Expression',
   // Statements
   ForStatement: 'Statement',
   WhileStatement: 'Statement',
@@ -370,6 +381,16 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       if (n.exported) children.push(n.exported);
       break;
     }
+    case 'ExtensionFunctionDeclaration': {
+      const n = node as ExtensionFunctionDeclaration;
+      children.push(n.receiverType);
+      if (n.typeParams) for (const tp of n.typeParams) children.push(tp);
+      children.push(n.name);
+      for (const p of n.params) children.push(p);
+      children.push(n.returnType);
+      children.push(n.body);
+      break;
+    }
     // ── Expressions ──
     case 'BinaryExpr': {
       const n = node as BinaryExpr;
@@ -479,6 +500,11 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
         }
         // TemplateStringPart has no AST children
       }
+      break;
+    }
+    case 'AwaitExpr': {
+      const n = node as AwaitExpr;
+      children.push(n.argument);
       break;
     }
     // ── Statements ──
@@ -594,6 +620,7 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
     case 'BooleanLiteral':
     case 'NullLiteral':
     case 'Identifier':
+    case 'ThisExpr':
     case 'WildcardPattern':
     case 'NullPattern':
     case 'BreakStatement':

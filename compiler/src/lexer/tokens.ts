@@ -43,7 +43,7 @@ export interface Trivia {
  * Categories:
  * - **Keywords**: language-reserved words (`let`, `if`, `match`, etc.)
  * - **Identifiers and literals**: user-defined names, numbers, strings
- * - **Operators**: arithmetic, comparison, logical, null-coalescing, pipe
+ * - **Operators**: arithmetic, comparison, logical, null-coalescing
  * - **Punctuation**: braces, brackets, parens, delimiters
  * - **Special**: `EOF` (end of input) and `Error` (malformed input)
  *
@@ -59,6 +59,8 @@ export type TokenKind =
   | 'import' | 'export' | 'from' | 'for' | 'while'
   | 'try' | 'catch' | 'throw' | 'break' | 'continue' | 'return'
   | 'in' | 'true' | 'false' | 'null' | 'new'
+  | 'fun' | 'this'
+  | 'async' | 'await'
   // Identifiers and literals
   | 'Identifier'
   | 'NumberLiteral'
@@ -71,7 +73,7 @@ export type TokenKind =
   | 'AmpAmp' | 'PipePipe' | 'Bang'
   | 'QuestionDot' | 'QuestionQuestion' | 'Question'
   | 'FatArrow' | 'Equal'
-  | 'Pipe' | 'PipeGreater'
+  | 'Pipe'
   // Punctuation
   | 'LeftParen' | 'RightParen'
   | 'LeftBrace' | 'RightBrace'
@@ -107,4 +109,6 @@ export const KEYWORDS: ReadonlySet<string> = new Set<TokenKind>([
   'import', 'export', 'from', 'for', 'while',
   'try', 'catch', 'throw', 'break', 'continue', 'return',
   'in', 'true', 'false', 'null', 'new',
+  'fun', 'this',
+  'async', 'await',
 ]);

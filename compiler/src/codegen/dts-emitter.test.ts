@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { emitDTS } from './dts-emitter.js';
 import type {
   Program, LetDeclaration, TypeDeclaration, VariantDeclaration,
-  ExportDeclaration, Identifier, NumberLiteral, StringLiteral,
+  ExportDeclaration, ExtensionFunctionDeclaration,
+  Identifier, NumberLiteral, StringLiteral,
   ArrowFunction, FunctionParam, ExpressionStatement,
   Expression, Declaration, Statement,
   RecordType as RecordTypeNode, RecordTypeField,
@@ -459,5 +460,259 @@ describe('DTS Emitter', () => {
     const ast = program(decl);
     const result = emitDTS(ast);
     expect(result).toContain(': any;');
+  });
+
+  // ── Extension function declarations ────────────────────────
+
+  it('emits exported extension function as declare const', () => {
+    const ext = extensionDecl('string', 'words', [], stringType, {
+      kind: 'array', element: stringType,
+    }, { exported: true });
+    const ast = program(ext);
+    const result = emitDTS(ast);
+    expect(result).toContain('export declare const string_words: (__this: string) => Array<string>;');
+  });
+
+  it('emits extension with params', () => {
+    const ext = extensionDecl('string', 'startsWith', [
+      { name: 'prefix', type: stringType, optional: false, hasDefault: false },
+    ], stringType, boolType, { exported: true });
+    const ast = program(ext);
+    const result = emitDTS(ast);
+    expect(result).toContain('export declare const string_startsWith: (__this: string, prefix: string) => boolean;');
+  });
+
+  it('emits generic extension function', () => {
+    const elementType: Type = { kind: 'generic', name: 'T' };
+    const ext = extensionDecl('Array', 'first', [], {
+      kind: 'array', element: elementType,
+    }, { kind: 'nullable', inner: elementType }, {
+      exported: true,
+      typeParams: [{ name: 'T' }],
+    });
+    const ast = program(ext);
+    const result = emitDTS(ast);
+    expect(result).toContain('export declare const Array_first: <T>(__this: Array<T>) => T | null;');
+  });
+
+  it('does not emit non-exported extension function', () => {
+    const ext = extensionDecl('string', 'words', [], stringType, {
+      kind: 'array', element: stringType,
+    }, { exported: false });
+    const ast = program(ext);
+    const result = emitDTS(ast);
+    expect(result).toBe('');
+  });
+
+  it('emits extension via ExportDeclaration wrapper', () => {
+    const ext = extensionDecl('number', 'double', [], numberType, numberType, { exported: true });
+    const node: Record<string, unknown> = {
+      kind: 'ExportDeclaration',
+      declaration: ext,
+      span,
+    };
+    const ast = program(node as unknown as ExportDeclaration);
+    const result = emitDTS(ast);
+    expect(result).toContain('export declare const number_double: (__this: number) => number;');
+  });
+
+  // ── Collection Types in DTS ────────────────────────────────
+
+  describe('Set and Map DTS emission', () => {
+    it('emits exported Set<string> constant', () => {
+      const setType: Type = { kind: 'set', element: { kind: 'primitive', name: 'string' } };
+      const init = id('x');
+      (init as unknown as Record<string, unknown>)['resolvedType'] = setType;
+      const decl = letDecl('names', init, { exported: true });
+      (decl as unknown as Record<string, unknown>)['resolvedType'] = setType;
+      const ast = program(decl);
+      const result = emitDTS(ast);
+      expect(result).toContain('export declare const names: Set<string>;');
+    });
+
+    it('emits exported Map<string, number> constant', () => {
+      const mapType: Type = {
+        kind: 'map',
+        key: { kind: 'primitive', name: 'string' },
+        value: { kind: 'primitive', name: 'number' },
+      };
+      const init = id('x');
+      (init as unknown as Record<string, unknown>)['resolvedType'] = mapType;
+      const decl = letDecl('scores', init, { exported: true });
+      (decl as unknown as Record<string, unknown>)['resolvedType'] = mapType;
+      const ast = program(decl);
+      const result = emitDTS(ast);
+      expect(result).toContain('export declare const scores: Map<string, number>;');
+    });
+
+    it('emits exported function returning Set<string>', () => {
+      const fnType: FT = {
+        kind: 'function',
+        params: [],
+        returnType: { kind: 'set', element: { kind: 'primitive', name: 'string' } },
+      };
+      const body = id('x');
+      const fn = arrow([], body);
+      (fn as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+      const decl = letDecl('getNames', fn, { exported: true });
+      (decl as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+      const ast = program(decl);
+      const result = emitDTS(ast);
+      expect(result).toContain('export declare const getNames: () => Set<string>;');
+    });
+
+    it('emits exported function returning Map<K, V>', () => {
+      const fnType: FT = {
+        kind: 'function',
+        params: [],
+        returnType: {
+          kind: 'map',
+          key: { kind: 'primitive', name: 'string' },
+          value: { kind: 'primitive', name: 'number' },
+        },
+      };
+      const body = id('x');
+      const fn = arrow([], body);
+      (fn as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+      const decl = letDecl('getScores', fn, { exported: true });
+      (decl as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+      const ast = program(decl);
+      const result = emitDTS(ast);
+      expect(result).toContain('export declare const getScores: () => Map<string, number>;');
+    });
+
+    it('emits nested Set<Map<K,V>> correctly', () => {
+      const innerMap: Type = {
+        kind: 'map',
+        key: { kind: 'primitive', name: 'string' },
+        value: { kind: 'primitive', name: 'number' },
+      };
+      const setOfMaps: Type = { kind: 'set', element: innerMap };
+      const init = id('x');
+      (init as unknown as Record<string, unknown>)['resolvedType'] = setOfMaps;
+      const decl = letDecl('data', init, { exported: true });
+      (decl as unknown as Record<string, unknown>)['resolvedType'] = setOfMaps;
+      const ast = program(decl);
+      const result = emitDTS(ast);
+      expect(result).toContain('export declare const data: Set<Map<string, number>>;');
+    });
+
+    it('ADT variant with Set<T> field detects generic T', () => {
+      const td = typeDecl('Container', [
+        variant('Items', [['items', 'T']]),
+      ], {
+        exported: true,
+        typeParams: [{ kind: 'TypeParameter', name: id('T'), span }],
+      });
+      const setOfT: Type = { kind: 'set', element: { kind: 'generic', name: 'T' } };
+      const ctorType: FT = {
+        kind: 'function',
+        params: [{ name: 'items', type: setOfT, optional: false, hasDefault: false }],
+        returnType: {
+          kind: 'adt', name: 'Container',
+          typeArgs: [{ kind: 'generic', name: 'T' }],
+          variants: [],
+        } as ADTType,
+        typeParams: [{ name: 'T' }],
+      };
+      withType(td.variants[0], ctorType);
+      // Also set resolvedType on the field's type expression
+      const itemsField = td.variants[0].fields[0];
+      (itemsField as unknown as Record<string, unknown>)['resolvedType'] = setOfT;
+      const ast = program(td);
+      const result = emitDTS(ast);
+      expect(result).toContain('export interface Items<T>');
+      expect(result).toContain('readonly items: Set<T>');
+      expect(result).toContain('export declare const Items: <T>(items: Set<T>) => Items<T>;');
+    });
+
+    it('ADT variant with Map<K, V> field detects both K and V generics', () => {
+      const td = typeDecl('Cache', [
+        variant('Loaded', [['data', 'K']]),
+      ], {
+        exported: true,
+        typeParams: [
+          { kind: 'TypeParameter', name: id('K'), span },
+          { kind: 'TypeParameter', name: id('V'), span },
+        ],
+      });
+      const mapOfKV: Type = {
+        kind: 'map',
+        key: { kind: 'generic', name: 'K' },
+        value: { kind: 'generic', name: 'V' },
+      };
+      const ctorType: FT = {
+        kind: 'function',
+        params: [{ name: 'data', type: mapOfKV, optional: false, hasDefault: false }],
+        returnType: {
+          kind: 'adt', name: 'Cache',
+          typeArgs: [{ kind: 'generic', name: 'K' }, { kind: 'generic', name: 'V' }],
+          variants: [],
+        } as ADTType,
+        typeParams: [{ name: 'K' }, { name: 'V' }],
+      };
+      withType(td.variants[0], ctorType);
+      const dataField = td.variants[0].fields[0];
+      (dataField as unknown as Record<string, unknown>)['resolvedType'] = mapOfKV;
+      const ast = program(td);
+      const result = emitDTS(ast);
+      expect(result).toContain('export interface Loaded<K, V>');
+      expect(result).toContain('readonly data: Map<K, V>');
+      expect(result).toContain('export declare const Loaded: <K, V>(data: Map<K, V>) => Loaded<K, V>;');
+    });
+  });
+});
+
+// ── Extension Declaration Helper ────────────────────────────
+
+function extensionDecl(
+  receiverName: string,
+  methodName: string,
+  params: Array<{ name: string; type: Type; optional: boolean; hasDefault: boolean }>,
+  receiverType: Type,
+  returnType: Type,
+  opts?: { exported?: boolean; typeParams?: Array<{ name: string }> },
+): ExtensionFunctionDeclaration {
+  const span: Span = {
+    file: 'test.efs',
+    start: { offset: 0, line: 1, column: 0 },
+    end: { offset: 0, line: 1, column: 0 },
+  };
+  const fnType: FT = opts?.typeParams
+    ? { kind: 'function', params, returnType, typeParams: opts.typeParams }
+    : { kind: 'function', params, returnType };
+  const node: Record<string, unknown> = {
+    kind: 'ExtensionFunctionDeclaration',
+    receiverType: { kind: 'NamedType', name: { kind: 'Identifier', name: receiverName, span }, span },
+    name: { kind: 'Identifier', name: methodName, span },
+    params: [],
+    returnType: { kind: 'NamedType', name: { kind: 'Identifier', name: 'void', span }, span },
+    body: { kind: 'Identifier', name: 'this', span },
+    exported: opts?.exported ?? false,
+    span,
+    resolvedType: fnType,
+    resolvedReceiverType: receiverType,
+  };
+  return node as unknown as ExtensionFunctionDeclaration;
+}
+
+// ── Async/Await DTS ────────────────────────────────────────────
+
+describe('Async function DTS emission', () => {
+  it('emits async function without async keyword (just Promise<T> return)', () => {
+    const fnType: FT = {
+      kind: 'function',
+      params: [{ name: 's', type: { kind: 'primitive', name: 'string' } }],
+      returnType: { kind: 'promise', inner: { kind: 'primitive', name: 'number' } },
+    };
+    const fn = arrow([param('s')], num(42));
+    (fn as unknown as Record<string, unknown>)['async'] = true;
+    (fn as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+    const decl = letDecl('fetchNum', fn, { exported: true });
+    (decl as unknown as Record<string, unknown>)['resolvedType'] = fnType;
+    const ast = program(decl);
+    const result = emitDTS(ast);
+    expect(result).toContain('export declare const fetchNum: (s: string) => Promise<number>;');
+    expect(result).not.toContain('async');
   });
 });

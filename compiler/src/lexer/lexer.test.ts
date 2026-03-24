@@ -43,6 +43,7 @@ describe('Keywords and Identifiers', () => {
     'import', 'export', 'from', 'for', 'while',
     'try', 'catch', 'throw', 'break', 'continue', 'return',
     'in', 'true', 'false', 'null', 'new',
+    'fun', 'this', 'async', 'await',
   ];
 
   it.each(allKeywords)('should tokenize keyword %s', (kw) => {
@@ -79,6 +80,18 @@ describe('Keywords and Identifiers', () => {
     const tok = first('_');
     expect(tok.kind).toBe('Identifier');
     expect(tok.text).toBe('_');
+  });
+
+  it('should tokenize `asyncable` as identifier (not keyword)', () => {
+    const tok = first('asyncable');
+    expect(tok.kind).toBe('Identifier');
+    expect(tok.text).toBe('asyncable');
+  });
+
+  it('should tokenize `awaitable` as identifier (not keyword)', () => {
+    const tok = first('awaitable');
+    expect(tok.kind).toBe('Identifier');
+    expect(tok.text).toBe('awaitable');
   });
 });
 
@@ -251,7 +264,6 @@ describe('Operators', () => {
       ['?.', 'QuestionDot'],
       ['??', 'QuestionQuestion'],
       ['=>', 'FatArrow'],
-      ['|>', 'PipeGreater'],
     ];
     for (const [src, expected] of ops) {
       const tok = first(src);
@@ -265,8 +277,8 @@ describe('Operators', () => {
     expect(kinds('!==')).toEqual(['BangEqual', 'Equal']);
     // ||> should be PipePipe + Greater
     expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
-    // |> should be PipeGreater
-    expect(kinds('|>')).toEqual(['PipeGreater']);
+    // |> should be Pipe + Greater (pipe operator removed in v0.2)
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
     // => should be FatArrow
     expect(kinds('=>')).toEqual(['FatArrow']);
   });
@@ -485,8 +497,8 @@ describe('Edge Cases', () => {
     expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
   });
 
-  it('should disambiguate adjacent operators: |>', () => {
-    expect(kinds('|>')).toEqual(['PipeGreater']);
+  it('should disambiguate adjacent operators: |> (now Pipe + Greater)', () => {
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
   });
 
   it('should lex number followed by identifier: 123abc', () => {
@@ -732,6 +744,18 @@ describe('Comment Edge Cases', () => {
     const k = kinds('/* nested /* */ */');
     expect(k).toContain('Star');
     expect(k).toContain('Slash');
+  });
+});
+
+// ── Pipe Operator Removal Tests ──────────────────────────────────────
+
+describe('Pipe operator removal (v0.2)', () => {
+  it('should tokenize |> as Pipe + Greater (two separate tokens)', () => {
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
+  });
+
+  it('should still tokenize ||> as PipePipe + Greater', () => {
+    expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
   });
 });
 

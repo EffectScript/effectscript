@@ -399,7 +399,7 @@ function emitEmptyExportWarnings(
       if (dep.kind !== 'efs') continue;
       const sig = graph.getExports(dep.path);
       if (!sig) continue;
-      if (sig.values.size === 0 && sig.types.size === 0 && sig.adtConstructors.size === 0) {
+      if (sig.values.size === 0 && sig.types.size === 0 && sig.adtConstructors.size === 0 && sig.extensions.size === 0) {
         diagnostics.report({
           severity: 'warning',
           code: D.W500,
