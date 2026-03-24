@@ -46,7 +46,7 @@ class MockTypeProvider implements TypeDeclarationProvider {
   }
 
   getExportedTypes(modulePath: string): ExportedTypeSignature {
-    return this.signatures.get(modulePath) ?? { types: new Map(), values: new Map(), adtConstructors: new Map() };
+    return this.signatures.get(modulePath) ?? { types: new Map(), values: new Map(), adtConstructors: new Map(), extensions: new Map() };
   }
 
   getConstructorSignature(_modulePath: string, _name: string): FunctionType | null {
@@ -200,6 +200,7 @@ let total = fromB + fromC
         returnType: { kind: 'primitive', name: 'number' },
       } satisfies FunctionType]]),
       adtConstructors: new Map(),
+      extensions: new Map(),
     });
 
     const result = compileFiles({

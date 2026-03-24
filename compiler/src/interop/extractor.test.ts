@@ -121,4 +121,41 @@ describe('TsTypeExtractor', () => {
     const callSigs = greetType.getCallSignatures();
     expect(callSigs.length).toBeGreaterThan(0);
   });
+
+  // ── export = handling ─────────────────────────────────────
+
+  describe('export = handling', () => {
+    it('synthesizes default export from export = function', () => {
+      const result = extractor.extract(path.join(fixturesDir, 'export-equals-simple.d.ts'));
+      expect(result).not.toBeNull();
+      expect(result!.exports.has('default')).toBe(true);
+    });
+
+    it('exposes namespace members as named exports alongside default', () => {
+      const result = extractor.extract(path.join(fixturesDir, 'export-equals-simple.d.ts'));
+      expect(result).not.toBeNull();
+      // Namespace members should be available as named exports
+      expect(result!.exports.has('helper')).toBe(true);
+      expect(result!.exports.has('VERSION')).toBe(true);
+    });
+
+    it('synthesizes default export from export = class', () => {
+      const result = extractor.extract(path.join(fixturesDir, 'export-equals-class.d.ts'));
+      expect(result).not.toBeNull();
+      expect(result!.exports.has('default')).toBe(true);
+    });
+
+    it('synthesizes default export from export = namespace', () => {
+      const result = extractor.extract(path.join(fixturesDir, 'export-equals-namespace.d.ts'));
+      expect(result).not.toBeNull();
+      expect(result!.exports.has('default')).toBe(true);
+    });
+
+    it('exposes namespace function members as named exports for namespace-only export =', () => {
+      const result = extractor.extract(path.join(fixturesDir, 'export-equals-namespace.d.ts'));
+      expect(result).not.toBeNull();
+      expect(result!.exports.has('createElement')).toBe(true);
+      expect(result!.exports.has('useState')).toBe(true);
+    });
+  });
 });

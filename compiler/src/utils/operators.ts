@@ -11,7 +11,6 @@
  * Maps binary operator tokens to their precedence level.
  *
  * Higher number = tighter binding. Levels:
- * - 1: `|>` (pipe)
  * - 2: `||` (logical OR)
  * - 3: `&&` (logical AND)
  * - 4: `==`, `!=` (equality)
@@ -22,7 +21,6 @@
  * - 8: `*`, `/`, `%` (multiplicative)
  */
 export const OPERATOR_PRECEDENCE: Readonly<Record<string, number>> = {
-  '|>': 1,
   '||': 2,
   '&&': 3,
   '==': 4, '!=': 4,
@@ -35,7 +33,7 @@ export const OPERATOR_PRECEDENCE: Readonly<Record<string, number>> = {
 /**
  * Returns the precedence level for a binary operator token.
  *
- * @param op - The operator string (e.g. `"+"`, `"&&"`, `"|>"`).
+ * @param op - The operator string (e.g. `"+"`, `"&&"`, `"??"`).
  * @returns The precedence level, or `0` if the operator is unknown.
  */
 export function getOperatorPrecedence(op: string): number {

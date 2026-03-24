@@ -29,7 +29,6 @@
  * - `E003` — Unknown escape sequence
  * - `E004` — Unexpected character
  * - `E005` — Expected hex digits after `0x`
- * - `E006` — Lone `&` (did you mean `&&`?)
  * - `E008` — Unterminated string interpolation
  */
 
@@ -707,7 +706,7 @@ class Lexer {
     return { kind: 'Greater', text: '>', span: this.makeSpan(start, this.currentPosition()) };
   }
 
-  /** Read `&&` (logical and). A lone `&` reports `E006` as an error. */
+  /** Read `&` (intersection type operator) or `&&` (logical and). */
   private readAmpersand(): Omit<Token, 'leadingTrivia' | 'trailingTrivia'> {
     const start = this.currentPosition();
     this.pos++;
@@ -717,13 +716,10 @@ class Lexer {
       this.column++;
       return { kind: 'AmpAmp', text: '&&', span: this.makeSpan(start, this.currentPosition()) };
     }
-    // Single & is an error
-    const span = this.makeSpan(start, this.currentPosition());
-    this.reportDiagnostic(D.E006, "Unexpected character '&'; did you mean '&&'?", span);
-    return { kind: 'Error', text: '&', span };
+    return { kind: 'Amp', text: '&', span: this.makeSpan(start, this.currentPosition()) };
   }
 
-  /** Read `|`, `||`, or `|>` (union/ADT separator, logical or, pipe operator). */
+  /** Read `|` or `||` (union/ADT separator, logical or). */
   private readPipe(): Omit<Token, 'leadingTrivia' | 'trailingTrivia'> {
     const start = this.currentPosition();
     this.pos++;
@@ -732,11 +728,6 @@ class Lexer {
       this.pos++;
       this.column++;
       return { kind: 'PipePipe', text: '||', span: this.makeSpan(start, this.currentPosition()) };
-    }
-    if (this.peek() === '>') {
-      this.pos++;
-      this.column++;
-      return { kind: 'PipeGreater', text: '|>', span: this.makeSpan(start, this.currentPosition()) };
     }
     return { kind: 'Pipe', text: '|', span: this.makeSpan(start, this.currentPosition()) };
   }
@@ -759,8 +750,19 @@ class Lexer {
     return { kind: 'Question', text: '?', span: this.makeSpan(start, this.currentPosition()) };
   }
 
-  /** Read a `.` (member access / decimal point — decimal is handled by `readNumber`). */
+  /** Read `.`, `..`, or `..<` (member access, inclusive range, exclusive range). */
   private readDot(): Omit<Token, 'leadingTrivia' | 'trailingTrivia'> {
+    if (this.peekAt(1) === '.') {
+      const start = this.currentPosition();
+      this.pos += 2;
+      this.column += 2;
+      if (this.peek() === '<') {
+        this.pos++;
+        this.column++;
+        return { kind: 'DotDotLess', text: '..<', span: this.makeSpan(start, this.currentPosition()) };
+      }
+      return { kind: 'DotDot', text: '..', span: this.makeSpan(start, this.currentPosition()) };
+    }
     return this.singleToken('Dot', '.');
   }
 

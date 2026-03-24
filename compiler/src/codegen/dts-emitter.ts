@@ -15,12 +15,14 @@
 
 import type {
   Program, LetDeclaration, TypeDeclaration,
-  ExportDeclaration, Declaration, Statement,
+  ExportDeclaration, ExtensionFunctionDeclaration,
+  Declaration, Statement,
 } from '../parser/ast.js';
 import type {
   Type, FunctionType, ADTType, RecordType,
   NullableType, ArrayType, TupleType, UnionType,
   PromiseType, GenericType, PrimitiveType,
+  SetType, MapType,
 } from '../checker/types.js';
 import { resolveType } from '../checker/types.js';
 import { rewriteImportPath } from '../utils/constants.js';
@@ -55,6 +57,10 @@ function typeToTsString(type: Type): string {
       return functionTypeToString(resolved as FunctionType);
     case 'record':
       return recordTypeToString(resolved as RecordType);
+    case 'lazy-record':
+      // Lazy records should not appear in .d.ts output (they come from TS imports,
+      // not EffectScript source). Fall back to 'any' if one is encountered.
+      return 'any';
     case 'array':
       return `Array<${typeToTsString((resolved as ArrayType).element)}>`;
     case 'tuple': {
@@ -74,13 +80,32 @@ function typeToTsString(type: Type): string {
       return 'any';
     case 'promise':
       return `Promise<${typeToTsString((resolved as PromiseType).inner)}>`;
+    case 'set':
+      return `Set<${typeToTsString((resolved as SetType).element)}>`;
+    case 'map': {
+      const mt = resolved as MapType;
+      return `Map<${typeToTsString(mt.key)}, ${typeToTsString(mt.value)}>`;
+    }
+    case 'literal': {
+      const lt = resolved as import('../checker/types.js').LiteralType;
+      if (lt.base === 'string') {
+        const escaped = String(lt.value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        return `"${escaped}"`;
+      }
+      return String(lt.value);
+    }
   }
 }
 
-/** Convert a function type to TypeScript syntax (e.g. `<T>(x: T) => string`). */
+/** Convert a function type to TypeScript syntax (e.g. `<T extends Foo>(x: T) => string`). */
 function functionTypeToString(ft: FunctionType): string {
   const typeParams = ft.typeParams && ft.typeParams.length > 0
-    ? `<${ft.typeParams.map(tp => tp.name).join(', ')}>`
+    ? `<${ft.typeParams.map(tp => {
+        const constraint = tp.constraint
+          ? ` extends ${typeToTsString(tp.constraint)}`
+          : '';
+        return `${tp.name}${constraint}`;
+      }).join(', ')}>`
     : '';
   const params = ft.params.map(p => `${p.name}: ${typeToTsString(p.type)}`).join(', ');
   return `${typeParams}(${params}) => ${typeToTsString(ft.returnType)}`;
@@ -130,6 +155,11 @@ function emitTopLevel(lines: string[], node: Declaration | Statement): void {
         emitTypeDTS(lines, node);
       }
       break;
+    case 'ExtensionFunctionDeclaration':
+      if (node.exported) {
+        emitExtensionDTS(lines, node);
+      }
+      break;
     case 'ExportDeclaration':
       emitExportDTS(lines, node);
       break;
@@ -157,6 +187,46 @@ function emitLetDTS(lines: string[], node: LetDeclaration): void {
   }
 }
 
+// ── Extension Function Declaration ────────────────────────
+
+/** Emit an extension function as `export declare const Type_method: (__this: ReceiverType, ...params) => ReturnType;`. */
+function emitExtensionDTS(lines: string[], node: ExtensionFunctionDeclaration): void {
+  const type = node.resolvedType;
+  if (type === undefined) return;
+
+  const resolved = resolveType(type);
+  if (resolved.kind !== 'function') return;
+
+  const ft = resolved as FunctionType;
+  const receiverTypeName = getReceiverTypeName(node.receiverType);
+  const emitName = `${receiverTypeName}_${node.name.name}`;
+
+  const typeParams = ft.typeParams && ft.typeParams.length > 0
+    ? `<${ft.typeParams.map(tp => {
+        const constraint = tp.constraint
+          ? ` extends ${typeToTsString(tp.constraint)}`
+          : '';
+        return `${tp.name}${constraint}`;
+      }).join(', ')}>`
+    : '';
+
+  const receiverTypeStr = node.resolvedReceiverType !== undefined
+    ? typeToTsString(node.resolvedReceiverType)
+    : receiverTypeName;
+
+  const params = [`__this: ${receiverTypeStr}`, ...ft.params.map(p => `${p.name}: ${typeToTsString(p.type)}`)];
+  lines.push(`export declare const ${emitName}: ${typeParams}(${params.join(', ')}) => ${typeToTsString(ft.returnType)};`);
+}
+
+/** Extract the receiver type name from a TypeNode. */
+function getReceiverTypeName(typeNode: unknown): string {
+  const node = typeNode as { kind: string; name?: { name: string } };
+  if (node.kind === 'NamedType' && node.name) {
+    return node.name.name;
+  }
+  return 'unknown';
+}
+
 // ── Type Declaration (ADT) ─────────────────────────────────
 
 /**
@@ -167,7 +237,8 @@ function emitLetDTS(lines: string[], node: LetDeclaration): void {
  */
 function emitTypeDTS(lines: string[], node: TypeDeclaration): void {
   // Named record type alias: emit as `export type Name = { ... };`
-  if (node.recordType !== undefined) {
+  // Also handles general type aliases (literal unions, etc.)
+  if (node.recordType !== undefined || node.typeAlias !== undefined) {
     const resolved = (node as unknown as { resolvedType?: Type }).resolvedType;
     if (resolved !== undefined) {
       lines.push(`export type ${node.name.name} = ${typeToTsString(resolved)};`);
@@ -177,8 +248,22 @@ function emitTypeDTS(lines: string[], node: TypeDeclaration): void {
 
   const typeParamNames = node.typeParams?.map(tp => tp.name.name) ?? [];
 
+  // Build a map from param name to its constrained DTS string (e.g., "T extends { id: string }")
+  const adtType = (node as unknown as { resolvedType?: Type }).resolvedType;
+  const resolvedAdt = adtType ? resolveType(adtType) : undefined;
+  const constraintMap = new Map<string, string>();
+  if (resolvedAdt && resolvedAdt.kind === 'adt' && resolvedAdt.typeParams) {
+    for (let i = 0; i < resolvedAdt.typeParams.length; i++) {
+      const tp = resolvedAdt.typeParams[i];
+      if (tp.constraint) {
+        constraintMap.set(tp.name, ` extends ${typeToTsString(tp.constraint)}`);
+      }
+    }
+  }
+  const formatTypeParam = (name: string): string => `${name}${constraintMap.get(name) ?? ''}`;
+
   for (const v of node.variants) {
-    emitVariantInterface(lines, v, typeParamNames);
+    emitVariantInterface(lines, v, typeParamNames, formatTypeParam);
   }
 
   // Type alias: union of all variants
@@ -187,19 +272,26 @@ function emitTypeDTS(lines: string[], node: TypeDeclaration): void {
     return vTypeParams.length > 0 ? `${v.name.name}<${vTypeParams.join(', ')}>` : v.name.name;
   });
 
-  const typeParamStr = typeParamNames.length > 0 ? `<${typeParamNames.join(', ')}>` : '';
+  const typeParamStr = typeParamNames.length > 0
+    ? `<${typeParamNames.map(formatTypeParam).join(', ')}>`
+    : '';
   lines.push(`export type ${node.name.name}${typeParamStr} = ${variantRefs.join(' | ')};`);
 
   // Constructor declarations
   for (const v of node.variants) {
-    emitVariantConstructorDTS(lines, v, typeParamNames);
+    emitVariantConstructorDTS(lines, v, typeParamNames, formatTypeParam);
   }
 }
 
 /** Emit an `export interface` for a single ADT variant with `_tag` discriminant and fields. */
-function emitVariantInterface(lines: string[], v: import('../parser/ast.js').VariantDeclaration, typeParamNames: string[]): void {
+function emitVariantInterface(
+  lines: string[],
+  v: import('../parser/ast.js').VariantDeclaration,
+  typeParamNames: string[],
+  formatTypeParam: (name: string) => string = (n) => n,
+): void {
   const vTypeParams = getVariantTypeParams(v, typeParamNames);
-  const typeParamStr = vTypeParams.length > 0 ? `<${vTypeParams.join(', ')}>` : '';
+  const typeParamStr = vTypeParams.length > 0 ? `<${vTypeParams.map(formatTypeParam).join(', ')}>` : '';
 
   lines.push(`export interface ${v.name.name}${typeParamStr} {`);
   lines.push(`  readonly _tag: "${v.name.name}";`);
@@ -314,6 +406,12 @@ function typeUsesGeneric(type: Type, name: string): boolean {
       return (resolved as ADTType).typeArgs.some(a => typeUsesGeneric(a, name));
     case 'promise':
       return typeUsesGeneric((resolved as PromiseType).inner, name);
+    case 'set':
+      return typeUsesGeneric((resolved as SetType).element, name);
+    case 'map': {
+      const mt = resolved as MapType;
+      return typeUsesGeneric(mt.key, name) || typeUsesGeneric(mt.value, name);
+    }
     default:
       return false;
   }
@@ -325,7 +423,12 @@ function typeUsesGeneric(type: Type, name: string): boolean {
  * Fieldless variants emit `export declare const Name: Name;`.
  * Variants with fields emit `export declare const Name: <T>(field: T) => Name<T>;`.
  */
-function emitVariantConstructorDTS(lines: string[], v: import('../parser/ast.js').VariantDeclaration, typeParamNames: string[]): void {
+function emitVariantConstructorDTS(
+  lines: string[],
+  v: import('../parser/ast.js').VariantDeclaration,
+  typeParamNames: string[],
+  formatTypeParam: (name: string) => string = (n) => n,
+): void {
   const vTypeParams = getVariantTypeParams(v, typeParamNames);
 
   if (v.fields.length === 0) {
@@ -333,7 +436,7 @@ function emitVariantConstructorDTS(lines: string[], v: import('../parser/ast.js'
     lines.push(`export declare const ${v.name.name}: ${v.name.name};`);
   } else {
     // Variant with fields: factory function
-    const typeParamStr = vTypeParams.length > 0 ? `<${vTypeParams.join(', ')}>` : '';
+    const typeParamStr = vTypeParams.length > 0 ? `<${vTypeParams.map(formatTypeParam).join(', ')}>` : '';
     const params: string[] = [];
     const returnTypeParams = vTypeParams.length > 0 ? `<${vTypeParams.join(', ')}>` : '';
 
@@ -355,6 +458,8 @@ function emitExportDTS(lines: string[], node: ExportDeclaration): void {
       emitLetDTS(lines, node.declaration);
     } else if (node.declaration.kind === 'TypeDeclaration' && node.declaration.exported) {
       emitTypeDTS(lines, node.declaration);
+    } else if (node.declaration.kind === 'ExtensionFunctionDeclaration' && node.declaration.exported) {
+      emitExtensionDTS(lines, node.declaration as ExtensionFunctionDeclaration);
     }
     return;
   }

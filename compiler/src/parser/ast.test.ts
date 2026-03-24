@@ -358,6 +358,7 @@ describe('AST Node Construction', () => {
         kind: 'FunctionParam',
         name: makeId('x'),
         type: { kind: 'NamedType', name: makeId('number'), span },
+        mutable: false,
         span,
       };
       const node: ArrowFunction = {
@@ -376,7 +377,7 @@ describe('AST Node Construction', () => {
       const node: ArrowFunction = {
         kind: 'ArrowFunction',
         typeParams: [{ kind: 'TypeParameter', name: makeId('T'), span }],
-        params: [{ kind: 'FunctionParam', name: makeId('x'), type: { kind: 'NamedType', name: makeId('T'), span }, span }],
+        params: [{ kind: 'FunctionParam', name: makeId('x'), type: { kind: 'NamedType', name: makeId('T'), span }, mutable: false, span }],
         returnType: { kind: 'NamedType', name: makeId('T'), span },
         body: makeId('x'),
         span,
@@ -391,6 +392,7 @@ describe('AST Node Construction', () => {
         name: makeId('name'),
         type: { kind: 'NamedType', name: makeId('string'), span },
         defaultValue: { kind: 'StringLiteral', value: 'world', span },
+        mutable: false,
         span,
       };
       expect(param.defaultValue).toBeDefined();

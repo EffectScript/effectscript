@@ -21,6 +21,10 @@ import type {
   ADTType,
   GenericType,
   ADTVariant,
+  RecordType,
+  SetType,
+  MapType,
+  ArrayType,
 } from '../checker/types.js';
 import { ANY, VOID } from '../checker/types.js';
 import type { ScopeManager, BindingInfo } from '../checker/scope.js';
@@ -45,6 +49,8 @@ export const PRELUDE_NAMES = {
   Err: 'Err',
   attempt: 'attempt',
   Result: 'Result',
+  Set: 'Set',
+  Map: 'Map',
 } as const;
 
 /** Synthetic source span used for all prelude declarations (`<prelude>` file). */
@@ -141,6 +147,44 @@ export function createPrelude(): PreludeDeclarations {
   };
   values.set('print', printFn);
 
+  // ── Set companion: { of: <T>(items: Array<T>) => Set<T> } ──
+  const K: GenericType = { kind: 'generic', name: 'K' };
+  const V: GenericType = { kind: 'generic', name: 'V' };
+
+  const setOfFn: FunctionType = {
+    kind: 'function',
+    typeParams: [{ name: 'T' }],
+    params: [{
+      name: 'items',
+      type: { kind: 'array', element: T } as ArrayType,
+      optional: false,
+      hasDefault: false,
+    }],
+    returnType: { kind: 'set', element: T } as SetType,
+  };
+  const setCompanion: RecordType = {
+    kind: 'record',
+    fields: new Map([['of', setOfFn as Type]]),
+  };
+  values.set('Set', setCompanion);
+
+  // ── Map companion: { of: <K, V>() => Map<K, V> } ──
+  // Map.of() takes no arguments — tuple expression syntax `("a", 1)` does not
+  // exist in the parser, so `Map.of([("a", 1)])` is not possible. Users create
+  // maps with `Map.of()` and populate via `.set()` calls. When tuple expression
+  // syntax is added, the signature can be upgraded to `Map.of(Array<(K,V)>)`.
+  const mapOfFn: FunctionType = {
+    kind: 'function',
+    typeParams: [{ name: 'K' }, { name: 'V' }],
+    params: [],
+    returnType: { kind: 'map', key: K, value: V } as MapType,
+  };
+  const mapCompanion: RecordType = {
+    kind: 'record',
+    fields: new Map([['of', mapOfFn as Type]]),
+  };
+  values.set('Map', mapCompanion);
+
   return { types, values, adtConstructors };
 }
 
@@ -167,6 +211,8 @@ export function registerPrelude(prelude: PreludeDeclarations, scope: ScopeManage
       mutable: false,
       declared: preludeSpan,
       referenced: true, // prelude bindings are always considered "referenced"
+      parameter: false,
+      contentMutable: false,
     };
     scope.declare(name, info);
   }

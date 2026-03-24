@@ -547,7 +547,7 @@ async function handleRunCommand(args: ParsedArgs): Promise<number> {
   const config = loadConfig(cwd, fs, args.options.config);
 
   const entryFile = resolveAbsolute(args.path);
-  const tmpDir = path.join(os.tmpdir(), `esc-run-${Date.now()}`);
+  const tmpDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), 'esc-run-'));
 
   const resolved = resolveConfig(config, { outDir: tmpDir, sourceMap: false });
 
@@ -583,6 +583,9 @@ async function handleRunCommand(args: ParsedArgs): Promise<number> {
   for (const file of result.outputFiles) {
     fs.writeFile(file.path, file.content);
   }
+
+  // Emit package.json with "type": "module" so Node.js treats .js as ESM
+  fs.writeFile(path.join(tmpDir, 'package.json'), '{"type":"module"}\n');
 
   // Find entry point JS file
   const entryBase = path.basename(entryFile, EFS_EXT);

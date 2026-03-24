@@ -12,7 +12,7 @@
  * - **Statement position**: bare `if`/`else`, bare blocks, bare `try`/`catch`.
  * - **Prelude mapping**: `print` → `console.log`, `Ok`/`Err` → factory functions,
  *   `attempt` → `__attempt` helper. Helpers are only emitted when used.
- * - **Operator rewriting**: `==` → `===`, `!=` → `!==`, `|>` → nested calls.
+ * - **Operator rewriting**: `==` → `===`, `!=` → `!==`.
  * - **Import rewriting**: relative `.efs` paths → `.js` extension.
  * - **Null/undefined interop**: `null` arguments converted to `undefined` when the
  *   callee parameter has `nullKind === 'undefined'` or `'either'`.
@@ -22,16 +22,16 @@
 
 import type {
   Program, LetDeclaration, TypeDeclaration, VariantDeclaration,
-  ImportDeclaration, ExportDeclaration,
+  ImportDeclaration, ExportDeclaration, ExtensionFunctionDeclaration,
   NumberLiteral, StringLiteral, BooleanLiteral,
   Identifier, BinaryExpr, UnaryExpr, CallExpr, NewExpr,
   MemberExpr, IfExpr, MatchExpr, BlockExpr,
-  ArrowFunction, TryCatchExpr,
+  ArrowFunction, TryCatchExpr, AwaitExpr,
   ArrayExpr, RecordExpr, TemplateString,
   ForStatement, WhileStatement, AssignmentStatement,
   ThrowStatement, ReturnStatement, ExpressionStatement,
   Expression, Declaration, Statement,
-  Pattern,
+  Pattern, TypeNode,
 } from '../parser/ast.js';
 import { isDeclaration, isStatement } from '../parser/ast.js';
 import type { ADTType, FunctionType, ParamType, Type } from '../checker/types.js';
@@ -55,7 +55,11 @@ interface PreludeUsage {
   usesOk: boolean;
   usesErr: boolean;
   usesAttempt: boolean;
+  usesAsyncAttempt: boolean;
 }
+
+/** Tracks whether the emitter is inside an async function body (for async-aware IIFEs). */
+let inAsyncContext = false;
 
 /** Check if an expression is the prelude `print` function by inspecting its resolved type. */
 function isPreludePrint(node: Expression): boolean {
@@ -112,7 +116,7 @@ function isPreludeResultConstructor(node: Expression): boolean {
  * @returns Which prelude helpers are used and need to be emitted.
  */
 function scanPreludeUsage(ast: Program): PreludeUsage {
-  const result: PreludeUsage = { usesOk: false, usesErr: false, usesAttempt: false };
+  const result: PreludeUsage = { usesOk: false, usesErr: false, usesAttempt: false, usesAsyncAttempt: false };
   scanNode(ast, result);
   return result;
 }
@@ -136,7 +140,13 @@ function scanNode(node: unknown, usage: PreludeUsage): void {
     if (isPreludePrint(callNode.callee)) { /* print doesn't need helper */ }
     if (isPreludeOk(callNode.callee)) usage.usesOk = true;
     if (isPreludeErr(callNode.callee)) usage.usesErr = true;
-    if (isPreludeAttempt(callNode.callee)) usage.usesAttempt = true;
+    if (isPreludeAttempt(callNode.callee)) {
+      if ((n as Record<string, unknown>)['isAsyncAttempt']) {
+        usage.usesAsyncAttempt = true;
+      } else {
+        usage.usesAttempt = true;
+      }
+    }
   }
 
   // Recurse into arrays and object properties
@@ -166,6 +176,7 @@ function scanNode(node: unknown, usage: PreludeUsage): void {
  * @returns The generated JavaScript source code.
  */
 export function emitJS(ast: Program): string {
+  inAsyncContext = false;
   const ctx = new EmitContext();
   const prelude = scanPreludeUsage(ast);
 
@@ -176,7 +187,7 @@ export function emitJS(ast: Program): string {
     emitTopLevel(ctx, item, prelude);
   }
 
-  return ctx.getOutput();
+  return prependExtTempVars(ctx);
 }
 
 /**
@@ -189,6 +200,7 @@ export function emitJS(ast: Program): string {
  * @returns The generated JS source and the EmitContext with source mappings.
  */
 export function emitJSWithContext(ast: Program): { source: string; context: EmitContext } {
+  inAsyncContext = false;
   const ctx = new EmitContext();
   const prelude = scanPreludeUsage(ast);
 
@@ -198,7 +210,18 @@ export function emitJSWithContext(ast: Program): { source: string; context: Emit
     emitTopLevel(ctx, item, prelude);
   }
 
-  return { source: ctx.getOutput(), context: ctx };
+  return { source: prependExtTempVars(ctx), context: ctx };
+}
+
+/**
+ * Prepend extension temp variable declarations if any were used for optional chaining,
+ * then return the complete output.
+ */
+function prependExtTempVars(ctx: EmitContext): string {
+  const count = ctx.getExtTempVarCount();
+  if (count === 0) return ctx.getOutput();
+  const vars = Array.from({ length: count }, (_, i) => `__ext_r${i}`).join(', ');
+  return `let ${vars};\n` + ctx.getOutput();
 }
 
 // ── Prelude Helpers ────────────────────────────────────────
@@ -223,6 +246,9 @@ function emitPreludeHelpers(ctx: EmitContext, prelude: PreludeUsage): void {
   }
   if (prelude.usesAttempt) {
     ctx.writeLine('const __attempt = (f) => { try { return { _tag: "Ok", value: f() }; } catch (e) { return { _tag: "Err", error: e }; } };');
+  }
+  if (prelude.usesAsyncAttempt) {
+    ctx.writeLine('const __attempt_async = async (f) => { try { return { _tag: "Ok", value: await f() }; } catch (e) { return { _tag: "Err", error: e instanceof Error ? e : new Error(String(e)) }; } };');
   }
 }
 
@@ -251,6 +277,9 @@ function emitTopLevel(ctx: EmitContext, node: Declaration | Statement, prelude: 
       break;
     case 'ExportDeclaration':
       emitExportDeclaration(ctx, node, prelude);
+      break;
+    case 'ExtensionFunctionDeclaration':
+      emitExtensionFunctionDeclaration(ctx, node as ExtensionFunctionDeclaration, prelude, node.exported ? 'export' : '');
       break;
     case 'ForStatement':
       emitForStatement(ctx, node, prelude);
@@ -319,11 +348,17 @@ function emitLetDeclaration(ctx: EmitContext, node: LetDeclaration, prelude: Pre
   if (node.initializer.kind === 'ArrowFunction') {
     const fn = node.initializer as ArrowFunction;
     if (fn.body.kind === 'BlockExpr') {
+      const isAsync = fn.async === true;
       ctx.addMapping(node.span);
-      ctx.write(`${prefix}${keyword} ${node.name.name} = (`);
+      ctx.write(`${prefix}${keyword} ${node.name.name} = `);
+      if (isAsync) ctx.write('async ');
+      ctx.write('(');
       emitParams(ctx, fn.params, prelude);
       ctx.write(') => ');
+      const savedAsyncContext = inAsyncContext;
+      inAsyncContext = isAsync ? true : false;
       emitBlockBody(ctx, fn.body as BlockExpr, prelude);
+      inAsyncContext = savedAsyncContext;
       ctx.newLine();
       return;
     }
@@ -340,8 +375,8 @@ function emitLetDeclaration(ctx: EmitContext, node: LetDeclaration, prelude: Pre
  * constructors (frozen singletons or factory functions).
  */
 function emitTypeDeclaration(ctx: EmitContext, node: TypeDeclaration, exportPrefix: string): void {
-  // Named record type aliases are erased — no runtime code
-  if (node.recordType !== undefined) return;
+  // Type aliases (record types and literal unions) are erased — no runtime code
+  if (node.recordType !== undefined || node.typeAlias !== undefined) return;
 
   const prefix = exportPrefix ? exportPrefix + ' ' : '';
   for (const v of node.variants) {
@@ -366,6 +401,67 @@ function emitVariantConstructor(ctx: EmitContext, v: VariantDeclaration, exportP
     const fieldEntries = paramNames.join(', ');
     ctx.writeLine(`${exportPrefix}const ${v.name.name} = (${paramNames.join(', ')}) => ({ _tag: "${v.name.name}", ${fieldEntries} });`);
   }
+}
+
+/**
+ * Emit an extension function declaration as `[export] const EmitName = [async] (__this, ...params) => body`.
+ *
+ * The emit name is `ReceiverTypeName_methodName`. The implicit receiver is
+ * exposed as `__this` in the function body.
+ */
+function emitExtensionFunctionDeclaration(
+  ctx: EmitContext,
+  node: ExtensionFunctionDeclaration,
+  prelude: PreludeUsage,
+  exportPrefix: string,
+): void {
+  const receiverTypeName = getReceiverTypeName(node.receiverType);
+  const emitName = `${receiverTypeName}_${node.name.name}`;
+  const prefix = exportPrefix ? exportPrefix + ' ' : '';
+  const isAsync = node.async === true;
+
+  ctx.addMapping(node.span);
+
+  // Block body: emit with multi-line formatting
+  if (node.body.kind === 'BlockExpr') {
+    ctx.write(`${prefix}const ${emitName} = `);
+    if (isAsync) ctx.write('async ');
+    ctx.write('(__this');
+    if (node.params.length > 0) {
+      ctx.write(', ');
+      emitParams(ctx, node.params, prelude);
+    }
+    ctx.write(') => ');
+    const savedAsyncContext = inAsyncContext;
+    inAsyncContext = isAsync;
+    emitBlockBody(ctx, node.body as BlockExpr, prelude);
+    inAsyncContext = savedAsyncContext;
+    ctx.newLine();
+    return;
+  }
+
+  // Expression body: emit on a single line
+  ctx.write(`${prefix}const ${emitName} = `);
+  if (isAsync) ctx.write('async ');
+  ctx.write('(__this');
+  if (node.params.length > 0) {
+    ctx.write(', ');
+    emitParams(ctx, node.params, prelude);
+  }
+  ctx.write(') => ');
+  const savedAsyncContext = inAsyncContext;
+  inAsyncContext = isAsync;
+  emitExpr(ctx, node.body, prelude);
+  inAsyncContext = savedAsyncContext;
+  ctx.writeLine(';');
+}
+
+/** Extract the receiver type name from a TypeNode for emit name computation. */
+function getReceiverTypeName(typeNode: TypeNode): string {
+  if (typeNode.kind === 'NamedType') {
+    return typeNode.name.name;
+  }
+  return 'unknown';
 }
 
 /**
@@ -415,6 +511,8 @@ function emitExportDeclaration(ctx: EmitContext, node: ExportDeclaration, prelud
       emitLetDeclaration(ctx, node.declaration, prelude, 'export');
     } else if (node.declaration.kind === 'TypeDeclaration') {
       emitTypeDeclaration(ctx, node.declaration, 'export');
+    } else if (node.declaration.kind === 'ExtensionFunctionDeclaration') {
+      emitExtensionFunctionDeclaration(ctx, node.declaration as ExtensionFunctionDeclaration, prelude, 'export');
     }
     return;
   }
@@ -434,14 +532,107 @@ function emitExportDeclaration(ctx: EmitContext, node: ExportDeclaration, prelud
 
 // ── Statements ─────────────────────────────────────────────
 
-/** Emit a `for (const x of iterable)` loop. */
+/**
+ * Emit a for-loop: range → C-style for, array → for...of.
+ *
+ * Handles range syntax (.., ..<), record/tuple destructuring, and
+ * withIndex() optimization (→ .entries() in for-loop position).
+ */
 function emitForStatement(ctx: EmitContext, node: ForStatement, prelude: PreludeUsage): void {
   ctx.addMapping(node.span);
-  ctx.write(`for (const ${node.variable.name} of `);
-  emitExpr(ctx, node.iterable, prelude);
+
+  // ── Range loop → C-style for ──
+  if (node.range) {
+    const varName = node.variable.kind === 'Identifier' ? node.variable.name : '_';
+    const op = node.range.exclusive ? '<' : '<=';
+    const needsTemp = !isSimpleEndExpr(node.range.end);
+
+    if (needsTemp) {
+      // Wrap in a block to scope the temporary
+      ctx.writeLine('{');
+      ctx.indent();
+      ctx.write('const __end = ');
+      emitExpr(ctx, node.range.end, prelude);
+      ctx.writeLine(';');
+      ctx.write(`for (let ${varName} = `);
+      emitExpr(ctx, node.range.start, prelude);
+      ctx.write(`; ${varName} ${op} __end; ${varName}++) `);
+      emitBlockStatements(ctx, node.body, prelude);
+      ctx.newLine();
+      ctx.dedent();
+      ctx.writeLine('}');
+    } else {
+      ctx.write(`for (let ${varName} = `);
+      emitExpr(ctx, node.range.start, prelude);
+      ctx.write(`; ${varName} ${op} `);
+      emitExpr(ctx, node.range.end, prelude);
+      ctx.write(`; ${varName}++) `);
+      emitBlockStatements(ctx, node.body, prelude);
+      ctx.newLine();
+    }
+    return;
+  }
+
+  // ── Array loop with destructuring or simple identifier ──
+  ctx.write('for (const ');
+  emitForVariable(ctx, node.variable);
+  ctx.write(' of ');
+  emitForIterable(ctx, node.iterable, prelude);
   ctx.write(') ');
   emitBlockStatements(ctx, node.body, prelude);
   ctx.newLine();
+}
+
+/** Emit the loop variable binding pattern for a for...of loop. */
+function emitForVariable(ctx: EmitContext, variable: ForStatement['variable']): void {
+  if (variable.kind === 'Identifier') {
+    ctx.write(variable.name);
+  } else if (variable.kind === 'RecordPattern') {
+    ctx.write('{ ');
+    ctx.write(variable.fields.map(f => f.name.name).join(', '));
+    ctx.write(' }');
+  } else if (variable.kind === 'TuplePattern') {
+    ctx.write('[');
+    ctx.write(variable.elements.map(el =>
+      el.kind === 'WildcardPattern' ? '' : el.name,
+    ).join(', '));
+    ctx.write(']');
+  }
+}
+
+/**
+ * Emit the iterable expression in a for-loop.
+ *
+ * Detects `arr.withIndex()` calls and rewrites them to `arr.entries()`
+ * for efficient iteration (avoids creating an intermediate array).
+ */
+function emitForIterable(ctx: EmitContext, iterable: Expression, prelude: PreludeUsage): void {
+  if (isWithIndexCall(iterable)) {
+    const callNode = iterable as CallExpr;
+    const memberNode = callNode.callee as MemberExpr;
+    emitExpr(ctx, memberNode.object, prelude);
+    ctx.write('.entries()');
+    return;
+  }
+  emitExpr(ctx, iterable, prelude);
+}
+
+/** Check if an expression is a `arr.withIndex()` call. */
+function isWithIndexCall(expr: Expression): boolean {
+  return expr.kind === 'CallExpr' &&
+    (expr as CallExpr).callee.kind === 'MemberExpr' &&
+    ((expr as CallExpr).callee as MemberExpr).property.name === 'withIndex' &&
+    (expr as CallExpr).args.length === 0;
+}
+
+/**
+ * Check if an end expression is "simple" enough to not need a temporary.
+ *
+ * Simple expressions: identifiers, number literals, member expressions
+ * (property accesses like arr.length are side-effect-free).
+ */
+function isSimpleEndExpr(expr: Expression): boolean {
+  return expr.kind === 'Identifier' || expr.kind === 'NumberLiteral' || expr.kind === 'MemberExpr';
 }
 
 /** Emit a `while` loop. */
@@ -570,6 +761,16 @@ function emitExpr(ctx: EmitContext, node: Expression, prelude: PreludeUsage): vo
     case 'TemplateString':
       emitTemplateString(ctx, node as TemplateString, prelude);
       break;
+    case 'AwaitExpr':
+      emitAwaitExpr(ctx, node as AwaitExpr, prelude);
+      break;
+    case 'ThisExpr':
+      ctx.write('__this');
+      break;
+    case 'NamedArgument':
+      // NamedArgument nodes should never reach emitExpr — the emitter
+      // processes resolvedArgs (parameter-ordered values, not wrappers).
+      throw new Error('Internal error: NamedArgument reached emitExpr');
     default:
       break;
   }
@@ -589,18 +790,9 @@ function emitStringLiteral(ctx: EmitContext, node: StringLiteral): void {
 /**
  * Emit a binary expression with operator rewriting and precedence-based parenthesization.
  *
- * Rewrites `|>` to nested calls, `==` to `===`, and `!=` to `!==`.
+ * Rewrites `==` to `===` and `!=` to `!==`.
  */
 function emitBinaryExpr(ctx: EmitContext, node: BinaryExpr, prelude: PreludeUsage): void {
-  // Pipe operator: x |> f → f(x)
-  if (node.operator === '|>') {
-    emitExpr(ctx, node.right, prelude);
-    ctx.write('(');
-    emitExpr(ctx, node.left, prelude);
-    ctx.write(')');
-    return;
-  }
-
   const jsOp = node.operator === '==' ? '===' : node.operator === '!=' ? '!==' : node.operator;
 
   // Left operand: needs parens if lower precedence
@@ -633,8 +825,6 @@ function emitBinaryExpr(ctx: EmitContext, node: BinaryExpr, prelude: PreludeUsag
 function needsParens(parent: BinaryExpr, child: Expression, side: 'left' | 'right'): boolean {
   if (child.kind !== 'BinaryExpr') return false;
   const childBin = child as BinaryExpr;
-  // Pipe has its own emission, no parens needed
-  if (childBin.operator === '|>') return false;
   const parentPrec = getPrec(parent.operator);
   const childPrec = getPrec(childBin.operator);
   if (childPrec < parentPrec) return true;
@@ -649,6 +839,352 @@ function emitUnaryExpr(ctx: EmitContext, node: UnaryExpr, prelude: PreludeUsage)
   emitExpr(ctx, node.operand, prelude);
 }
 
+// ── Collection Method Codegen ──────────────────────────────
+
+/** Check whether an expression is trivial (no side effects on re-evaluation). */
+function isTrivialExpr(expr: Expression): boolean {
+  return expr.kind === 'Identifier' || expr.kind === 'NumberLiteral' ||
+    expr.kind === 'StringLiteral' || expr.kind === 'BooleanLiteral' ||
+    expr.kind === 'NullLiteral';
+}
+
+/** Get the resolved type of an AST node (if the checker set it). */
+function getResolvedType(node: Expression): Type | undefined {
+  return node.resolvedType;
+}
+
+/**
+ * Attempt to emit a collection-specific method call.
+ * Returns true if the call was handled, false if the caller should use default emission.
+ */
+function tryEmitCollectionCall(
+  ctx: EmitContext,
+  node: CallExpr,
+  prelude: PreludeUsage,
+): boolean {
+  if (node.callee.kind !== 'MemberExpr') return false;
+  const member = node.callee as MemberExpr;
+  const methodName = member.property.name;
+
+  // Factory calls: Set.of(...), Map.of(...)
+  if (member.object.kind === 'Identifier') {
+    const ident = member.object as Identifier;
+    const resolved = getResolvedType(ident);
+    if (resolved !== undefined) {
+      const r = resolveType(resolved);
+      if (ident.name === 'Set' && r.kind === 'record' && methodName === 'of') {
+        ctx.write('new Set(');
+        emitArgs(ctx, node.args, prelude);
+        ctx.write(')');
+        return true;
+      }
+      if (ident.name === 'Map' && r.kind === 'record' && methodName === 'of') {
+        ctx.write('new Map(');
+        emitArgs(ctx, node.args, prelude);
+        ctx.write(')');
+        return true;
+      }
+    }
+  }
+
+  // Instance method calls: resolve the receiver's type
+  const receiverType = getResolvedType(member.object);
+  if (receiverType === undefined) return false;
+  const resolved = resolveType(receiverType);
+
+  // Unwrap nullable for optional chaining
+  const unwrapped = resolved.kind === 'nullable' ? resolveType(resolved.inner) : resolved;
+  const isOptionalChain = member.optional && resolved.kind === 'nullable';
+
+  switch (unwrapped.kind) {
+    case 'set':
+      return tryEmitSetMethod(ctx, member, node.args, methodName, prelude, isOptionalChain);
+    case 'map':
+      return tryEmitMapMethod(ctx, member, node.args, methodName, prelude, isOptionalChain);
+    case 'array':
+      return tryEmitArrayMethod(ctx, member, node.args, methodName, prelude, isOptionalChain);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Emit the receiver for optional-chaining non-passthrough methods.
+ * For trivial receivers: `recv != null ? <expansion> : null`
+ * For non-trivial receivers: IIFE `((__t) => __t != null ? <expansion> : null)(recv)`
+ * Returns the identifier to use for the receiver in the expansion.
+ */
+function emitOptionalChainPrefix(
+  ctx: EmitContext,
+  member: MemberExpr,
+  prelude: PreludeUsage,
+  isOptionalChain: boolean,
+): { receiverRef: string; close: () => void } | null {
+  if (!isOptionalChain) return null;
+
+  if (isTrivialExpr(member.object)) {
+    // Emit receiver name directly; caller uses it in expansion
+    const name = (member.object as Identifier).name;
+    ctx.write(name + ' != null ? ');
+    return {
+      receiverRef: name,
+      close: () => ctx.write(' : null'),
+    };
+  } else {
+    ctx.write('((__t) => __t != null ? ');
+    return {
+      receiverRef: '__t',
+      close: () => {
+        ctx.write(' : null)(');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write(')');
+      },
+    };
+  }
+}
+
+function tryEmitSetMethod(
+  ctx: EmitContext, member: MemberExpr, args: readonly Expression[],
+  methodName: string, prelude: PreludeUsage, isOptionalChain: boolean,
+): boolean {
+  switch (methodName) {
+    case 'toArray': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write('Array.from(' + chain.receiverRef + ')');
+        chain.close();
+      } else {
+        ctx.write('Array.from(');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write(')');
+      }
+      return true;
+    }
+    case 'map':
+    case 'filter': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write('new Set(Array.from(' + chain.receiverRef + ').' + methodName + '(');
+        emitArgs(ctx, args, prelude);
+        ctx.write('))');
+        chain.close();
+      } else {
+        ctx.write('new Set(Array.from(');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write(').' + methodName + '(');
+        emitArgs(ctx, args, prelude);
+        ctx.write('))');
+      }
+      return true;
+    }
+    case 'union': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write('new Set([...' + chain.receiverRef + ', ...');
+        emitArgs(ctx, args, prelude);
+        ctx.write('])');
+        chain.close();
+      } else {
+        ctx.write('new Set([...');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write(', ...');
+        emitArgs(ctx, args, prelude);
+        ctx.write('])');
+      }
+      return true;
+    }
+    case 'intersect':
+    case 'difference': {
+      const negate = methodName === 'difference' ? '!' : '';
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      const recv = chain ? chain.receiverRef : null;
+      if (isTrivialExpr(args[0])) {
+        ctx.write('new Set(Array.from(');
+        if (recv) ctx.write(recv);
+        else emitExpr(ctx, member.object, prelude);
+        ctx.write(').filter((__el) => ' + negate);
+        emitExpr(ctx, args[0], prelude);
+        ctx.write('.has(__el)))');
+      } else {
+        ctx.write('((__other) => new Set(Array.from(');
+        if (recv) ctx.write(recv);
+        else emitExpr(ctx, member.object, prelude);
+        ctx.write(').filter((__el) => ' + negate + '__other.has(__el))))(');
+        emitExpr(ctx, args[0], prelude);
+        ctx.write(')');
+      }
+      if (chain) chain.close();
+      return true;
+    }
+    default:
+      // has, add, delete, clear, forEach, size — passthrough
+      return false;
+  }
+}
+
+function tryEmitMapMethod(
+  ctx: EmitContext, member: MemberExpr, args: readonly Expression[],
+  methodName: string, prelude: PreludeUsage, isOptionalChain: boolean,
+): boolean {
+  switch (methodName) {
+    case 'get': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.get(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.get(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+      }
+      return true;
+    }
+    case 'keys':
+    case 'values':
+    case 'entries': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write('Array.from(' + chain.receiverRef + '.' + methodName + '())');
+        chain.close();
+      } else {
+        ctx.write('Array.from(');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.' + methodName + '())');
+      }
+      return true;
+    }
+    case 'map': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write('new Map(Array.from(' + chain.receiverRef + '.entries()).map(([__k, __v]) => [__k, (');
+        emitExpr(ctx, args[0], prelude);
+        ctx.write(')(__v, __k)]))');
+        chain.close();
+      } else {
+        ctx.write('new Map(Array.from(');
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.entries()).map(([__k, __v]) => [__k, (');
+        emitExpr(ctx, args[0], prelude);
+        ctx.write(')(__v, __k)]))');
+      }
+      return true;
+    }
+    default:
+      // has, set, delete, clear, forEach, size — passthrough
+      return false;
+  }
+}
+
+function tryEmitArrayMethod(
+  ctx: EmitContext, member: MemberExpr, args: readonly Expression[],
+  methodName: string, prelude: PreludeUsage, isOptionalChain: boolean,
+): boolean {
+  switch (methodName) {
+    case 'first': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '[0] ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('[0] ?? null');
+      }
+      return true;
+    }
+    case 'last': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.at(-1) ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.at(-1) ?? null');
+      }
+      return true;
+    }
+    case 'find': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.find(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.find(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+      }
+      return true;
+    }
+    case 'fold': {
+      // fold(init, fn) → reduce(fn, init) — reorder args
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.reduce(');
+        emitExpr(ctx, args[1], prelude);
+        ctx.write(', ');
+        emitExpr(ctx, args[0], prelude);
+        ctx.write(')');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.reduce(');
+        emitExpr(ctx, args[1], prelude);
+        ctx.write(', ');
+        emitExpr(ctx, args[0], prelude);
+        ctx.write(')');
+      }
+      return true;
+    }
+    case 'isEmpty': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.length === 0');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.length === 0');
+      }
+      return true;
+    }
+    case 'pop':
+    case 'shift': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.' + methodName + '() ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.' + methodName + '() ?? null');
+      }
+      return true;
+    }
+    case 'at': {
+      const chain = emitOptionalChainPrefix(ctx, member, prelude, isOptionalChain);
+      if (chain) {
+        ctx.write(chain.receiverRef + '.at(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+        chain.close();
+      } else {
+        emitExpr(ctx, member.object, prelude);
+        ctx.write('.at(');
+        emitArgs(ctx, args, prelude);
+        ctx.write(') ?? null');
+      }
+      return true;
+    }
+    default:
+      // flatMap, findIndex, indexOf, reduce, every, some, sort,
+      // push, unshift, map, filter, forEach, includes — passthrough
+      return false;
+  }
+}
+
 /**
  * Emit a call expression with prelude rewriting and null/undefined interop.
  *
@@ -659,20 +1195,103 @@ function emitUnaryExpr(ctx: EmitContext, node: UnaryExpr, prelude: PreludeUsage)
 function emitCallExpr(ctx: EmitContext, node: CallExpr, prelude: PreludeUsage): void {
   ctx.addMapping(node.span);
 
+  // withIndex() in general expression context → .map((v, i) => [i, v])
+  if (isWithIndexCall(node)) {
+    const member = node.callee as MemberExpr;
+    emitExpr(ctx, member.object, prelude);
+    ctx.write('.map((v, i) => [i, v])');
+    return;
+  }
+
+  const resolved = node.resolvedArgs;
+
   // Prelude print → console.log
   if (isPreludePrint(node.callee)) {
     ctx.write('console.log(');
-    emitArgs(ctx, node.args, prelude);
+    if (resolved) {
+      emitResolvedArgs(ctx, resolved, prelude, undefined);
+    } else {
+      emitArgs(ctx, node.args, prelude);
+    }
     ctx.write(')');
     return;
   }
 
-  // Prelude attempt → __attempt
+  // Prelude attempt → __attempt or __attempt_async
   if (isPreludeAttempt(node.callee)) {
-    ctx.write('__attempt(');
-    emitArgs(ctx, node.args, prelude);
+    const isAsyncAttempt = (node as unknown as Record<string, unknown>)['isAsyncAttempt'] === true;
+    ctx.write(isAsyncAttempt ? '__attempt_async(' : '__attempt(');
+    if (resolved) {
+      emitResolvedArgs(ctx, resolved, prelude, undefined);
+    } else {
+      emitArgs(ctx, node.args, prelude);
+    }
     ctx.write(')');
     return;
+  }
+
+  // Collection-specific method calls (Set, Map, Array non-passthroughs)
+  if (tryEmitCollectionCall(ctx, node, prelude)) return;
+
+  // Extension function calls: MemberExpr callee tagged with extensionEmitName
+  if (node.callee.kind === 'MemberExpr') {
+    const member = node.callee as MemberExpr;
+    const emitName = member.extensionEmitName;
+    if (emitName !== undefined) {
+      const extParams = getCalleeParams(node.callee);
+      if (member.optional) {
+        // Optional chaining on extension call
+        if (isSideEffectFree(member.object)) {
+          // Simple receiver (identifier, literal): no temp variable needed
+          emitExpr(ctx, member.object, prelude);
+          ctx.write(' == null ? undefined : ');
+          ctx.write(emitName);
+          ctx.write('(');
+          emitExpr(ctx, member.object, prelude);
+          if (node.args.length > 0) {
+            ctx.write(', ');
+            if (resolved) {
+              emitResolvedArgs(ctx, resolved, prelude, extParams);
+            } else {
+              emitArgsWithNullKind(ctx, node.args, prelude, extParams);
+            }
+          }
+          ctx.write(')');
+        } else {
+          // Complex receiver: use temp variable to prevent double evaluation
+          const tempIdx = ctx.getExtTempVarCount();
+          ctx.incrementExtTempVarCount();
+          const tempVar = `__ext_r${tempIdx}`;
+          ctx.write(`((${tempVar} = `);
+          emitExpr(ctx, member.object, prelude);
+          ctx.write(`) == null ? undefined : ${emitName}(${tempVar}`);
+          if (node.args.length > 0) {
+            ctx.write(', ');
+            if (resolved) {
+              emitResolvedArgs(ctx, resolved, prelude, extParams);
+            } else {
+              emitArgsWithNullKind(ctx, node.args, prelude, extParams);
+            }
+          }
+          ctx.write('))');
+        }
+      } else {
+        // Non-optional extension call: EmitName(receiver, args)
+        ctx.write(emitName);
+        ctx.write('(');
+        emitExpr(ctx, member.object, prelude);
+        if (node.args.length > 0) {
+          ctx.write(', ');
+          if (resolved) {
+            emitResolvedArgs(ctx, resolved, prelude, extParams);
+          } else {
+            emitArgsWithNullKind(ctx, node.args, prelude, extParams);
+          }
+        }
+        ctx.write(')');
+      }
+      return;
+    }
   }
 
   // Get callee's resolved FunctionType for null→undefined interop
@@ -680,7 +1299,11 @@ function emitCallExpr(ctx: EmitContext, node: CallExpr, prelude: PreludeUsage): 
 
   emitExpr(ctx, node.callee, prelude);
   ctx.write('(');
-  emitArgsWithNullKind(ctx, node.args, prelude, calleeParams);
+  if (resolved) {
+    emitResolvedArgs(ctx, resolved, prelude, calleeParams);
+  } else {
+    emitArgsWithNullKind(ctx, node.args, prelude, calleeParams);
+  }
   ctx.write(')');
 }
 
@@ -739,7 +1362,12 @@ function emitNewExpr(ctx: EmitContext, node: NewExpr, prelude: PreludeUsage): vo
   ctx.write('new ');
   emitExpr(ctx, node.callee, prelude);
   ctx.write('(');
-  emitArgs(ctx, node.args, prelude);
+  const resolved = node.resolvedArgs;
+  if (resolved) {
+    emitResolvedArgs(ctx, resolved, prelude, undefined);
+  } else {
+    emitArgs(ctx, node.args, prelude);
+  }
   ctx.write(')');
 }
 
@@ -755,6 +1383,43 @@ function emitArgs(ctx: EmitContext, args: readonly Expression[], prelude: Prelud
   for (let i = 0; i < args.length; i++) {
     if (i > 0) ctx.write(', ');
     emitExpr(ctx, args[i], prelude);
+  }
+}
+
+/**
+ * Emit parameter-ordered resolved arguments, inserting `undefined` for gaps
+ * (skipped defaulted params) and omitting trailing `undefined` entries.
+ */
+function emitResolvedArgs(
+  ctx: EmitContext,
+  resolvedArgs: readonly (Expression | undefined)[],
+  prelude: PreludeUsage,
+  params: readonly ParamType[] | undefined,
+): void {
+  // Find last non-undefined index to omit trailing defaults
+  let lastFilled = -1;
+  for (let i = resolvedArgs.length - 1; i >= 0; i--) {
+    if (resolvedArgs[i] !== undefined) { lastFilled = i; break; }
+  }
+
+  let first = true;
+  for (let i = 0; i <= lastFilled; i++) {
+    if (!first) ctx.write(', ');
+    first = false;
+    const argExpr = resolvedArgs[i];
+    if (argExpr === undefined) {
+      ctx.write('undefined');
+    } else if (argExpr.kind === 'NullLiteral' && params !== undefined && i < params.length) {
+      // Null/undefined interop: emit undefined for null args targeting undefined-kind params
+      const nullKind = params[i].nullKind;
+      if (nullKind === 'undefined' || nullKind === 'either') {
+        ctx.write('undefined');
+      } else {
+        emitExpr(ctx, argExpr, prelude);
+      }
+    } else {
+      emitExpr(ctx, argExpr, prelude);
+    }
   }
 }
 
@@ -814,7 +1479,11 @@ function emitBranchExpr(ctx: EmitContext, node: Expression, prelude: PreludeUsag
 
 /** Emit an if/else as an IIFE for expression position when ternary is not suitable (e.g. no else branch). */
 function emitIfIIFE(ctx: EmitContext, node: IfExpr, prelude: PreludeUsage): void {
-  ctx.write('(() => {');
+  if (inAsyncContext) {
+    ctx.write('await (async () => {');
+  } else {
+    ctx.write('(() => {');
+  }
   ctx.newLine();
   ctx.indent();
   ctx.writeIndented('if (');
@@ -876,7 +1545,11 @@ function emitIfStatement(ctx: EmitContext, node: IfExpr, prelude: PreludeUsage):
 
 /** Emit match in expression position as an IIFE wrapping an if/else chain with `return` values. */
 function emitMatchExpr(ctx: EmitContext, node: MatchExpr, prelude: PreludeUsage): void {
-  ctx.write('(() => {');
+  if (inAsyncContext) {
+    ctx.write('await (async () => {');
+  } else {
+    ctx.write('(() => {');
+  }
   ctx.newLine();
   ctx.indent();
   emitMatchChain(ctx, node, prelude, true);
@@ -1081,11 +1754,19 @@ function emitPatternBindings(ctx: EmitContext, pattern: Pattern, subject: Expres
  */
 function emitBlockExpr(ctx: EmitContext, node: BlockExpr, prelude: PreludeUsage): void {
   if (node.body.length === 0) {
-    ctx.write('(() => {})()');
+    if (inAsyncContext) {
+      ctx.write('await (async () => {})()');
+    } else {
+      ctx.write('(() => {})()');
+    }
     return;
   }
 
-  ctx.write('(() => {');
+  if (inAsyncContext) {
+    ctx.write('await (async () => {');
+  } else {
+    ctx.write('(() => {');
+  }
   ctx.newLine();
   ctx.indent();
   emitBlockBodyWithReturn(ctx, node.body, prelude);
@@ -1227,10 +1908,16 @@ function emitLetDeclarationIndented(ctx: EmitContext, node: LetDeclaration, prel
   if (node.initializer.kind === 'ArrowFunction') {
     const fn = node.initializer as ArrowFunction;
     if (fn.body.kind === 'BlockExpr') {
-      ctx.writeIndented(`${keyword} ${node.name.name} = (`);
+      const isAsync = fn.async === true;
+      ctx.writeIndented(`${keyword} ${node.name.name} = `);
+      if (isAsync) ctx.write('async ');
+      ctx.write('(');
       emitParams(ctx, fn.params, prelude);
       ctx.write(') => ');
+      const savedAsyncContext = inAsyncContext;
+      inAsyncContext = isAsync ? true : false;
       emitBlockBody(ctx, fn.body as BlockExpr, prelude);
+      inAsyncContext = savedAsyncContext;
       ctx.newLine();
       return;
     }
@@ -1295,7 +1982,11 @@ function emitStmtBody(ctx: EmitContext, node: Expression, prelude: PreludeUsage)
 
 /** Emit try/catch in expression position as an IIFE with `return` in both try and catch bodies. */
 function emitTryCatchExpr(ctx: EmitContext, node: TryCatchExpr, prelude: PreludeUsage): void {
-  ctx.write('(() => {');
+  if (inAsyncContext) {
+    ctx.write('await (async () => {');
+  } else {
+    ctx.write('(() => {');
+  }
   ctx.newLine();
   ctx.indent();
   ctx.writeLineIndented('try {');
@@ -1329,15 +2020,23 @@ function emitTryCatchStatement(ctx: EmitContext, node: TryCatchExpr, prelude: Pr
  * {@link emitBlockBody}. Simple expression bodies are emitted directly after `=>`.
  */
 function emitArrowFunction(ctx: EmitContext, node: ArrowFunction, prelude: PreludeUsage): void {
+  const isAsync = node.async === true;
+  if (isAsync) ctx.write('async ');
   ctx.write('(');
   emitParams(ctx, node.params, prelude);
   ctx.write(') => ');
+
+  // Track async context for IIFE emission
+  const savedAsyncContext = inAsyncContext;
+  inAsyncContext = isAsync ? true : false;
 
   if (node.body.kind === 'BlockExpr') {
     emitBlockBody(ctx, node.body as BlockExpr, prelude);
   } else {
     emitExpr(ctx, node.body, prelude);
   }
+
+  inAsyncContext = savedAsyncContext;
 }
 
 // ── Array / Record / Template ──────────────────────────────
@@ -1384,6 +2083,12 @@ function emitTemplateString(ctx: EmitContext, node: TemplateString, prelude: Pre
   ctx.write('`');
 }
 
+/** Emit an await expression: `await expr`. */
+function emitAwaitExpr(ctx: EmitContext, node: AwaitExpr, prelude: PreludeUsage): void {
+  ctx.write('await ');
+  emitExpr(ctx, node.argument, prelude);
+}
+
 // ── Helpers ────────────────────────────────────────────────
 
 /**
@@ -1395,5 +2100,15 @@ function emitTemplateString(ctx: EmitContext, node: TemplateString, prelude: Pre
 function isSimpleExpr(node: Expression): boolean {
   // Not a block expression and not an if expression with block branches
   return node.kind !== 'BlockExpr';
+}
+
+/** Whether an expression is side-effect-free and safe to emit twice (identifiers, literals, this). */
+function isSideEffectFree(node: Expression): boolean {
+  return node.kind === 'Identifier' ||
+    node.kind === 'NumberLiteral' ||
+    node.kind === 'StringLiteral' ||
+    node.kind === 'BooleanLiteral' ||
+    node.kind === 'NullLiteral' ||
+    node.kind === 'ThisExpr';
 }
 

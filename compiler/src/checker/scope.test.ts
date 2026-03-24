@@ -19,7 +19,7 @@ function dummySpan(): Span {
 }
 
 function binding(type: Type, mutable = false) {
-  return { type, mutable, declared: dummySpan(), referenced: false };
+  return { type, mutable, declared: dummySpan(), referenced: false, parameter: false, contentMutable: false };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

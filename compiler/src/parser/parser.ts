@@ -28,6 +28,7 @@ import type { Span } from '../utils/span.js';
 import { mergeSpans } from '../utils/span.js';
 import type { DiagnosticCollector } from '../diagnostics/collector.js';
 import { D } from '../diagnostics/codes.js';
+import { KEYWORDS } from '../lexer/tokens.js';
 import type { Token, TokenKind } from '../lexer/tokens.js';
 import type {
   Program, Declaration, Expression, Statement, Pattern, TypeNode,
@@ -36,6 +37,7 @@ import type {
   MatchArm, BlockExpr, FunctionParam,
   RecordField, TemplatePart,
   RecordPatternField, RecordTypeField, RecordType,
+  ForRange,
   ErrorNode,
 } from './ast.js';
 import { OPERATOR_PRECEDENCE } from '../utils/operators.js';
@@ -70,7 +72,7 @@ const TOKEN_TO_BINOP: Partial<Record<TokenKind, BinaryOperator>> = {
   EqualEqual: '==', BangEqual: '!=',
   Less: '<', Greater: '>', LessEqual: '<=', GreaterEqual: '>=',
   AmpAmp: '&&', PipePipe: '||',
-  QuestionQuestion: '??', PipeGreater: '|>',
+  QuestionQuestion: '??',
 };
 
 // ── Trivia Transfer ─────────────────────────────────────────────────
@@ -163,6 +165,17 @@ class Parser {
   private id(tok: Token): Identifier { return { kind: 'Identifier', name: tok.text, span: tok.span }; }
 
   /**
+   * Consume an identifier or reserved keyword token and return it.
+   * Used in positions where keywords are valid names (member access, property names).
+   */
+  private expectIdentifierName(): Token {
+    const t = this.cur();
+    if (t.kind === 'Identifier' || KEYWORDS.has(t.kind)) return this.advance();
+    this.error(D.E100, `Expected identifier or keyword, found '${t.kind}'`, t.span);
+    return { kind: 'Identifier', text: '', span: t.span, leadingTrivia: [], trailingTrivia: [] };
+  }
+
+  /**
    * Error recovery: skip tokens until a likely statement boundary.
    *
    * Stops at semicolons, closing braces, and declaration keywords
@@ -171,7 +184,7 @@ class Parser {
   private synchronize(): void {
     while (!this.atEnd()) {
       const k = this.cur().kind;
-      if (k === 'Semicolon' || k === 'RightBrace' || k === 'let' || k === 'type' || k === 'import' || k === 'export') return;
+      if (k === 'Semicolon' || k === 'RightBrace' || k === 'let' || k === 'type' || k === 'import' || k === 'export' || k === 'fun') return;
       this.advance();
     }
   }
@@ -216,6 +229,13 @@ class Parser {
       case 'type': return this.typeDecl(false);
       case 'import': return this.importDecl();
       case 'export': return this.exportDecl();
+      case 'fun': return this.extensionFunDecl(false);
+      case 'async':
+        if (this.peek(1).kind === 'fun') {
+          this.advance(); // consume 'async'
+          return this.extensionFunDecl(false, true);
+        }
+        return this.exprOrAssign();
       case 'for': return this.forStmt();
       case 'while': return this.whileStmt();
       case 'throw': return this.throwStmt();
@@ -300,9 +320,13 @@ class Parser {
 
     let variants: VariantDeclaration[] = [];
     let recordType: RecordType | undefined;
+    let typeAlias: TypeNode | undefined;
 
     if (this.check('LeftBrace')) {
       recordType = this.recordTy() as RecordType;
+    } else if (this.check('SimpleString') || this.check('NumberLiteral') || this.check('true') || this.check('false')) {
+      // Literal type alias: type HttpMethod = "GET" | "POST"
+      typeAlias = this.parseType();
     } else {
       variants = this.parseVariants();
     }
@@ -319,16 +343,25 @@ class Parser {
     };
     if (typeParams !== undefined) result['typeParams'] = typeParams;
     if (recordType !== undefined) result['recordType'] = recordType;
+    if (typeAlias !== undefined) result['typeAlias'] = typeAlias;
     return withTrivia(result as unknown as Declaration, typeTok, last);
   }
 
-  /** Parse a `<T, U, ...>` type parameter list. Assumes `<` is the current token. */
+  /** Parse a `<T, U: Constraint, ...>` type parameter list. Assumes `<` is the current token. */
   private parseTypeParams(): TypeParameter[] {
     this.advance(); // <
     const params: TypeParameter[] = [];
     while (!this.check('Greater') && !this.atEnd()) {
       const t = this.expect('Identifier');
-      params.push({ kind: 'TypeParameter', name: this.id(t), span: t.span });
+      const name = this.id(t);
+      let constraint: TypeNode | undefined;
+      if (this.match('Colon')) {
+        constraint = this.parseType();
+      }
+      const endSpan = constraint ? constraint.span : t.span;
+      const tp: Record<string, unknown> = { kind: 'TypeParameter', name, span: mergeSpans(t.span, endSpan) };
+      if (constraint !== undefined) tp['constraint'] = constraint;
+      params.push(tp as unknown as TypeParameter);
       if (!this.match('Comma')) break;
     }
     this.expect('Greater');
@@ -445,6 +478,21 @@ class Parser {
       return withTrivia(result as unknown as Declaration, exp, this.prev());
     }
 
+    if (this.check('fun') || (this.check('async') && this.peek(1).kind === 'fun')) {
+      const isAsync = this.check('async');
+      if (isAsync) this.advance(); // consume 'async'
+      const decl = this.extensionFunDecl(true, isAsync);
+      if (decl.kind === 'ExtensionFunctionDeclaration') {
+        const result: Record<string, unknown> = {
+          kind: 'ExportDeclaration',
+          declaration: decl,
+          span: mergeSpans(exp.span, decl.span),
+        };
+        return withTrivia(result as unknown as Declaration, exp, this.prev());
+      }
+      return { kind: 'ExportDeclaration', span: mergeSpans(exp.span, decl.span) } as Declaration;
+    }
+
     if (this.check('LeftBrace')) {
       this.advance();
       const specifiers: ExportSpecifier[] = [];
@@ -482,20 +530,199 @@ class Parser {
 
   // ── Statements ─────────────────────────────────────────────────────
 
-  /** Parse a `for (x in iterable) { ... }` loop statement. */
-  private forStmt(): Statement {
-    const f = this.advance();
+  /**
+   * Parse an extension function declaration: `[async] fun [<TypeParams>] ReceiverType.methodName(params): ReturnType => body`.
+   *
+   * @param exported - `true` if this declaration is wrapped by `export`.
+   * @param isAsync - `true` if preceded by `async` keyword.
+   */
+  private extensionFunDecl(exported: boolean, isAsync = false): Declaration | Statement {
+    const funTok = this.advance(); // consume 'fun'
+
+    // Optional type parameters: fun <T> ...
+    let typeParams: TypeParameter[] | undefined;
+    if (this.check('Less')) {
+      typeParams = this.parseTypeParams();
+    }
+
+    // Receiver type: a named type, possibly with type args
+    if (!this.check('Identifier')) {
+      this.error(D.E102, `Expected receiver type after 'fun'`, this.cur().span);
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    const receiverType = this.parseType();
+
+    // Dot separator
+    if (!this.match('Dot')) {
+      this.error(D.E102, `Expected '.' after receiver type in extension function`, this.cur().span);
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    // Method name
+    const nameToken = this.expect('Identifier');
+    const name = this.id(nameToken);
+
+    // Parameters
     this.expect('LeftParen');
-    const variable = this.id(this.expect('Identifier'));
+    const params = this.parseFnParams();
+    this.expect('RightParen');
+
+    // Return type annotation (required — report E222 if missing)
+    if (!this.match('Colon')) {
+      this.error(D.E222, `Extension function requires a return type annotation`, this.cur().span);
+      // Try to parse the rest anyway for recovery
+      if (this.match('FatArrow')) {
+        const body = this.expr();
+        const result: Record<string, unknown> = {
+          kind: 'ExtensionFunctionDeclaration',
+          receiverType, name, params, body, exported,
+          returnType: { kind: 'NamedType', name: { kind: 'Identifier', name: 'void', span: this.prev().span }, span: this.prev().span },
+          span: mergeSpans(funTok.span, this.prev().span),
+        };
+        if (typeParams !== undefined) result['typeParams'] = typeParams;
+        if (isAsync) result['async'] = true;
+        return withTrivia(result as unknown as Declaration, funTok, this.prev());
+      }
+      this.synchronize();
+      const en = this.errorNode(this.pos - 1);
+      return withTrivia<Statement>(
+        { kind: 'ExpressionStatement', expression: en as unknown as Expression, span: en.span },
+        funTok, this.prev(),
+      );
+    }
+
+    const returnType = this.parseType();
+
+    // Fat arrow
+    if (!this.match('FatArrow')) {
+      this.error(D.E106, "Expected '=>' after extension function return type", this.cur().span);
+    }
+
+    const body = this.expr();
+
+    const result: Record<string, unknown> = {
+      kind: 'ExtensionFunctionDeclaration',
+      receiverType, name, params, returnType, body, exported,
+      span: mergeSpans(funTok.span, this.prev().span),
+    };
+    if (typeParams !== undefined) result['typeParams'] = typeParams;
+    if (isAsync) result['async'] = true;
+    return withTrivia(result as unknown as Declaration, funTok, this.prev());
+  }
+
+  /**
+   * Parse a for loop: simple, range, or destructuring.
+   *
+   * Forms:
+   * - `for (x in iterable) { ... }` — simple array iteration
+   * - `for (i in 0..10) { ... }` — inclusive range
+   * - `for (i in 0..<10) { ... }` — exclusive range
+   * - `for ({ name, age } in users) { ... }` — record destructuring
+   * - `for ((a, b) in pairs) { ... }` — tuple destructuring
+   */
+  private forStmt(): Statement {
+    const f = this.advance(); // consume 'for'
+    this.expect('LeftParen');
+
+    // Parse loop variable: identifier, record pattern { ... }, or tuple pattern ( ... )
+    const variable = this.parseForVariable();
+
     if (!this.match('in')) this.error(D.E114, "Expected 'in' in for loop", this.cur().span);
-    const iterable = this.expr();
+
+    // Parse the iterable / range start expression
+    const startExpr = this.expr();
+
+    // Check for range operator: .. or ..<
+    let range: ForRange | undefined;
+    if (this.check('DotDot') || this.check('DotDotLess')) {
+      const rangeOp = this.advance();
+      const exclusive = rangeOp.kind === 'DotDotLess';
+      const endExpr = this.expr();
+      range = {
+        start: startExpr,
+        end: endExpr,
+        exclusive,
+        span: mergeSpans(startExpr.span, endExpr.span),
+      };
+    }
+
     this.expect('RightParen');
     const body = this.blockExpr();
     this.eatSemicolon();
-    return withTrivia<Statement>(
-      { kind: 'ForStatement', variable, iterable, body, span: mergeSpans(f.span, this.prev().span) },
-      f, this.prev(),
-    );
+
+    const result: Record<string, unknown> = {
+      kind: 'ForStatement',
+      variable,
+      iterable: startExpr,
+      body,
+      span: mergeSpans(f.span, this.prev().span),
+    };
+    if (range !== undefined) result['range'] = range;
+    return withTrivia<Statement>(result as unknown as Statement, f, this.prev());
+  }
+
+  /**
+   * Parse the loop variable in a for statement.
+   *
+   * Returns an Identifier, RecordPattern, or TuplePattern depending on
+   * the leading token: `{` → record, `(` → tuple, otherwise identifier.
+   */
+  private parseForVariable(): Identifier | import('./ast.js').RecordPattern | import('./ast.js').TuplePattern {
+    // Record destructuring: { name, age }
+    if (this.check('LeftBrace')) {
+      return this.recordPat() as import('./ast.js').RecordPattern;
+    }
+
+    // Tuple destructuring: (a, b) — must have at least 2 elements
+    if (this.check('LeftParen')) {
+      return this.parseForTuplePattern();
+    }
+
+    // Simple identifier
+    return this.id(this.expect('Identifier'));
+  }
+
+  /**
+   * Parse a tuple pattern for for-loop variable position: `(a, b)` or `(_, item)`.
+   *
+   * Requires at least 2 elements (with at least one comma) to disambiguate
+   * from a parenthesized identifier. A single-element `(a)` is a parse error.
+   */
+  private parseForTuplePattern(): import('./ast.js').TuplePattern {
+    const lp = this.advance(); // consume '('
+    const elements: (Identifier | import('./ast.js').WildcardPattern)[] = [];
+
+    while (!this.check('RightParen') && !this.atEnd()) {
+      if (this.check('Identifier') && this.cur().text === '_') {
+        elements.push({ kind: 'WildcardPattern', span: this.advance().span });
+      } else {
+        elements.push(this.id(this.expect('Identifier')));
+      }
+      if (!this.match('Comma')) break;
+    }
+
+    this.expect('RightParen');
+
+    if (elements.length < 2) {
+      this.error(D.E103, 'Tuple pattern requires at least 2 elements', mergeSpans(lp.span, this.prev().span));
+    }
+
+    return {
+      kind: 'TuplePattern',
+      elements,
+      span: mergeSpans(lp.span, this.prev().span),
+    };
   }
 
   /** Parse a `while (condition) { ... }` loop statement. */
@@ -661,6 +888,13 @@ class Parser {
           tok, tok,
         );
       }
+      case 'this': {
+        const tok = this.advance();
+        return withTrivia<Expression>(
+          { kind: 'ThisExpr', span: tok.span },
+          tok, tok,
+        );
+      }
       case 'if': return this.ifExpr();
       case 'match': return this.matchExpr();
       case 'try': return this.tryCatch();
@@ -681,6 +915,18 @@ class Parser {
         const o = this.expr(9);
         return withTrivia<Expression>(
           { kind: 'UnaryExpr', operator: '-', operand: o, span: mergeSpans(tok.span, o.span) },
+          tok, this.prev(),
+        );
+      }
+      case 'async': return this.asyncArrowFn();
+      case 'await': {
+        const tok = this.advance();
+        // Parse at unary precedence (same as ! and -) so that
+        // `await a + b` parses as `(await a) + b` and
+        // `await a.b()` parses as `await (a.b())`
+        const arg = this.expr(9);
+        return withTrivia<Expression>(
+          { kind: 'AwaitExpr', argument: arg, span: mergeSpans(tok.span, arg.span) },
           tok, this.prev(),
         );
       }
@@ -719,11 +965,33 @@ class Parser {
     );
   }
 
+  /**
+   * Parse a comma-separated argument list, detecting `name: value` as {@link NamedArgument}.
+   *
+   * Must be called after the opening `(` has been consumed. Does not consume `)`.
+   */
+  private parseCallArgs(): Expression[] {
+    const args: Expression[] = [];
+    while (!this.check('RightParen') && !this.atEnd()) {
+      // Check for named argument: Identifier followed by Colon (not inside braces)
+      if (this.check('Identifier') && this.peek(1).kind === 'Colon') {
+        const nameTok = this.advance(); // consume Identifier
+        this.advance();                 // consume Colon
+        const value = this.expr();      // parse the value expression
+        const name: Identifier = { kind: 'Identifier', name: nameTok.text, span: nameTok.span };
+        args.push({ kind: 'NamedArgument', name, value, span: mergeSpans(nameTok.span, value.span) } as Expression);
+      } else {
+        args.push(this.expr());
+      }
+      if (!this.match('Comma')) break;
+    }
+    return args;
+  }
+
   /** Parse a function call's argument list: `callee(arg1, arg2, ...)`. Assumes `(` is current. */
   private callExpr(callee: Expression): CallExpr {
     this.advance();
-    const args: Expression[] = [];
-    while (!this.check('RightParen') && !this.atEnd()) { args.push(this.expr()); if (!this.match('Comma')) break; }
+    const args = this.parseCallArgs();
     if (!this.match('RightParen')) this.error(D.E109, "Expected ')' to close '('", this.cur().span);
     return { kind: 'CallExpr', callee, args, span: mergeSpans(callee.span, this.prev().span) };
   }
@@ -767,8 +1035,7 @@ class Parser {
   /** Parse a generic function call `callee<T>(args)` after type args have been parsed. Assumes `(` is current. */
   private callExprWithTypeArgs(callee: Expression, typeArgs: TypeNode[]): CallExpr {
     this.advance(); // skip '('
-    const args: Expression[] = [];
-    while (!this.check('RightParen') && !this.atEnd()) { args.push(this.expr()); if (!this.match('Comma')) break; }
+    const args = this.parseCallArgs();
     if (!this.match('RightParen')) this.error(D.E109, "Expected ')' to close '('", this.cur().span);
     const result: Record<string, unknown> = {
       kind: 'CallExpr', callee, typeArgs, args,
@@ -785,7 +1052,7 @@ class Parser {
    */
   private memberExpr(object: Expression, optional: boolean): MemberExpr {
     this.advance();
-    const pt = this.expect('Identifier');
+    const pt = this.expectIdentifierName();
     return { kind: 'MemberExpr', object, property: this.id(pt), optional, span: mergeSpans(object.span, pt.span) };
   }
 
@@ -916,9 +1183,9 @@ class Parser {
       const parsed = this.tryParseTypeArgs();
       if (parsed !== null) typeArgs = parsed;
     }
-    const args: Expression[] = [];
+    let args: Expression[] = [];
     if (this.match('LeftParen')) {
-      while (!this.check('RightParen') && !this.atEnd()) { args.push(this.expr()); if (!this.match('Comma')) break; }
+      args = this.parseCallArgs();
       this.expect('RightParen');
     }
     const result: Record<string, unknown> = {
@@ -952,11 +1219,11 @@ class Parser {
   private braceExpr(): Expression {
     const n = this.peek(1);
     if (n.kind === 'RightBrace') return this.recordExpr();
-    if (n.kind === 'Identifier') {
+    if (n.kind === 'Identifier' || KEYWORDS.has(n.kind)) {
       const after = this.peek(2).kind;
       // { ident: ... } → explicit record field
-      // { ident, ... } → shorthand record field
-      if (after === 'Colon' || after === 'Comma') return this.recordExpr();
+      // { ident, ... } → shorthand record field (only for identifiers, not keywords)
+      if (after === 'Colon' || (after === 'Comma' && n.kind === 'Identifier')) return this.recordExpr();
     }
     return this.blockExpr();
   }
@@ -966,7 +1233,7 @@ class Parser {
     const lb = this.advance();
     const fields: RecordField[] = [];
     while (!this.check('RightBrace') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
+      const nt = this.expectIdentifierName();
       if (this.match('Colon')) {
         // Explicit: { name: expr }
         const v = this.expr();
@@ -1015,6 +1282,18 @@ class Parser {
       while (!this.check('Greater') && !this.atEnd()) {
         if (!this.check('Identifier')) return false;
         this.advance();
+        // Skip optional constraint after ':'
+        if (this.check('Colon')) {
+          this.advance(); // skip ':'
+          // Skip the constraint type by tracking nesting depth
+          let depth = 0;
+          while (!this.atEnd()) {
+            if ((this.check('Comma') || this.check('Greater')) && depth === 0) break;
+            if (this.check('LeftBrace') || this.check('LeftParen') || this.check('Less')) depth++;
+            else if (this.check('RightBrace') || this.check('RightParen') || this.check('Greater')) depth--;
+            this.advance();
+          }
+        }
         if (!this.match('Comma')) break;
       }
       if (!this.check('Greater')) return false;
@@ -1039,26 +1318,7 @@ class Parser {
    */
   private arrowFnWithTypeParams(firstToken: Token, typeParams: TypeParameter[]): Expression {
     this.advance(); // skip '('
-    const params: FunctionParam[] = [];
-    while (!this.check('RightParen') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
-      const nm = this.id(nt);
-      if (this.match('Colon')) {
-        const ty = this.parseType();
-        if (this.match('Equal')) {
-          const dv = this.expr();
-          params.push({ kind: 'FunctionParam', name: nm, type: ty, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
-        } else {
-          params.push({ kind: 'FunctionParam', name: nm, type: ty, span: mergeSpans(nt.span, ty.span) });
-        }
-      } else if (this.match('Equal')) {
-        const dv = this.expr();
-        params.push({ kind: 'FunctionParam', name: nm, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
-      } else {
-        params.push({ kind: 'FunctionParam', name: nm, span: nt.span });
-      }
-      if (!this.match('Comma')) break;
-    }
+    const params = this.parseFnParams();
     this.expect('RightParen');
 
     let returnType: TypeNode | undefined;
@@ -1095,6 +1355,8 @@ class Parser {
         return this.check('FatArrow');
       }
       while (!this.check('RightParen') && !this.atEnd()) {
+        // Skip optional `mut` keyword before parameter name
+        if (this.check('mut')) this.advance();
         if (!this.check('Identifier')) return false;
         this.advance();
         if (this.check('Colon')) { this.advance(); this.skipTy(); }
@@ -1121,7 +1383,10 @@ class Parser {
       while (d > 0 && !this.atEnd()) { if (this.check('LeftBrace')) d++; if (this.check('RightBrace')) d--; this.advance(); }
       return;
     }
-    if (this.check('Identifier')) {
+    // Literal types in type position: "GET", 42, true, false
+    if (this.check('SimpleString') || this.check('NumberLiteral') || this.check('true') || this.check('false')) {
+      this.advance();
+    } else if (this.check('Identifier')) {
       this.advance();
       if (this.check('Less')) {
         this.advance(); let d = 1;
@@ -1129,6 +1394,7 @@ class Parser {
       }
     }
     if (this.check('Question')) this.advance();
+    if (this.check('Amp')) { this.advance(); this.skipTy(); }
     if (this.check('Pipe')) { this.advance(); this.skipTy(); }
   }
 
@@ -1146,26 +1412,7 @@ class Parser {
   /** Parse a non-generic arrow function: `(params) [: ReturnType] => body`. Assumes `(` is current. */
   private arrowFn(): Expression {
     const lp = this.advance();
-    const params: FunctionParam[] = [];
-    while (!this.check('RightParen') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
-      const nm = this.id(nt);
-      if (this.match('Colon')) {
-        const ty = this.parseType();
-        if (this.match('Equal')) {
-          const dv = this.expr();
-          params.push({ kind: 'FunctionParam', name: nm, type: ty, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
-        } else {
-          params.push({ kind: 'FunctionParam', name: nm, type: ty, span: mergeSpans(nt.span, ty.span) });
-        }
-      } else if (this.match('Equal')) {
-        const dv = this.expr();
-        params.push({ kind: 'FunctionParam', name: nm, defaultValue: dv, span: mergeSpans(nt.span, dv.span) });
-      } else {
-        params.push({ kind: 'FunctionParam', name: nm, span: nt.span });
-      }
-      if (!this.match('Comma')) break;
-    }
+    const params = this.parseFnParams();
     this.expect('RightParen');
 
     if (this.match('Colon')) {
@@ -1188,6 +1435,112 @@ class Parser {
       { kind: 'ArrowFunction', params, body, span: mergeSpans(lp.span, this.prev().span) },
       lp, this.prev(),
     );
+  }
+
+  /**
+   * Parse an async arrow function: `async (params) => body` or `async <T>(params) => body`.
+   *
+   * Assumes the current token is `async`. The token after `async` must be `(` or `<`
+   * (since `async` is a reserved keyword, no ambiguity with identifiers).
+   */
+  private asyncArrowFn(): Expression {
+    const asyncTok = this.advance(); // consume 'async'
+    if (this.check('Less') && this.isGenericArrow()) {
+      // async <T>(params) => body
+      const typeParams = this.parseTypeParams();
+      return this.arrowFnWithTypeParamsAsync(asyncTok, typeParams);
+    }
+    if (this.check('LeftParen')) {
+      // async (params) => body
+      return this.arrowFnAsync(asyncTok);
+    }
+    this.error(D.E101, "Expected '(' or '<' after 'async'", this.cur().span);
+    const sp = this.pos; this.advance();
+    return this.errorNode(sp) as unknown as Expression;
+  }
+
+  /** Parse an async arrow function with type params already consumed. */
+  private arrowFnWithTypeParamsAsync(asyncTok: Token, typeParams: TypeParameter[]): Expression {
+    this.advance(); // skip '('
+    const params = this.parseFnParams();
+    this.expect('RightParen');
+
+    let returnType: TypeNode | undefined;
+    if (this.match('Colon')) returnType = this.parseType();
+
+    if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+    const body = this.expr();
+
+    const result: Record<string, unknown> = {
+      kind: 'ArrowFunction',
+      async: true,
+      typeParams,
+      params,
+      body,
+      span: mergeSpans(asyncTok.span, this.prev().span),
+    };
+    if (returnType !== undefined) result['returnType'] = returnType;
+    return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+  }
+
+  /** Parse an async non-generic arrow function: `async (params) [: ReturnType] => body`. */
+  private arrowFnAsync(asyncTok: Token): Expression {
+    this.advance(); // skip '('
+    const params = this.parseFnParams();
+    this.expect('RightParen');
+
+    if (this.match('Colon')) {
+      const returnType = this.parseType();
+      if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+      const body = this.expr();
+      const result: Record<string, unknown> = {
+        kind: 'ArrowFunction',
+        async: true,
+        params,
+        returnType,
+        body,
+        span: mergeSpans(asyncTok.span, this.prev().span),
+      };
+      return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+    }
+
+    if (!this.match('FatArrow')) this.error(D.E106, "Expected '=>' after arrow function parameters", this.cur().span);
+    const body = this.expr();
+    const result: Record<string, unknown> = {
+      kind: 'ArrowFunction',
+      async: true,
+      params,
+      body,
+      span: mergeSpans(asyncTok.span, this.prev().span),
+    };
+    return withTrivia(result as unknown as Expression, asyncTok, this.prev());
+  }
+
+  /** Parse function parameter list (used by async and regular arrows). */
+  private parseFnParams(): FunctionParam[] {
+    const params: FunctionParam[] = [];
+    while (!this.check('RightParen') && !this.atEnd()) {
+      const isMut = this.match('mut');
+      const startTok = isMut ? this.prev() : this.cur();
+      const nt = this.expect('Identifier');
+      const nm = this.id(nt);
+      if (this.match('Colon')) {
+        const ty = this.parseType();
+        if (this.match('Equal')) {
+          const dv = this.expr();
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, defaultValue: dv, mutable: isMut, span: mergeSpans(startTok.span, dv.span) });
+        } else {
+          params.push({ kind: 'FunctionParam', name: nm, type: ty, mutable: isMut, span: mergeSpans(startTok.span, ty.span) });
+        }
+      } else if (this.match('Equal')) {
+        const dv = this.expr();
+        params.push({ kind: 'FunctionParam', name: nm, defaultValue: dv, mutable: isMut, span: mergeSpans(startTok.span, dv.span) });
+      } else {
+        params.push({ kind: 'FunctionParam', name: nm, mutable: isMut, span: mergeSpans(startTok.span, nt.span) });
+      }
+      if (!this.match('Comma')) break;
+    }
+    return params;
   }
 
   // ── Patterns ───────────────────────────────────────────────────────
@@ -1235,7 +1588,7 @@ class Parser {
     const lb = this.advance();
     const fields: RecordPatternField[] = [];
     while (!this.check('RightBrace') && !this.atEnd()) {
-      const nt = this.expect('Identifier');
+      const nt = this.expectIdentifierName();
       if (this.match('Colon')) {
         fields.push({ name: this.id(nt), pattern: this.parsePattern() });
       } else {
@@ -1250,29 +1603,69 @@ class Parser {
   // ── Types ──────────────────────────────────────────────────────────
 
   /**
-   * Parse a type annotation, handling nullable (`?`) and union (`|`) suffixes.
+   * Parse a type annotation, handling nullable (`?`), intersection (`&`), and union (`|`).
    *
-   * Grammar: `primaryType [?] [| primaryType [?] ]*`
+   * Grammar: `intersectionType ('|' intersectionType)*`
+   * intersectionType: `primaryType '?'? ('&' primaryType '?'?)*`
    */
   private parseType(): TypeNode {
-    let ty = this.primaryTy();
-    if (this.match('Question')) ty = { kind: 'NullableType', inner: ty, span: mergeSpans(ty.span, this.prev().span) };
+    let ty = this.parseIntersectionType();
     if (this.check('Pipe')) {
       const ms: TypeNode[] = [ty];
       while (this.match('Pipe')) {
-        let m = this.primaryTy();
-        if (this.match('Question')) m = { kind: 'NullableType', inner: m, span: mergeSpans(m.span, this.prev().span) };
-        ms.push(m);
+        ms.push(this.parseIntersectionType());
       }
       return { kind: 'UnionType', members: ms, span: mergeSpans(ms[0].span, ms[ms.length - 1].span) };
     }
     return ty;
   }
 
-  /** Parse a primary type: named type with optional generic args, parenthesized type, or record type. */
+  /**
+   * Parse an intersection type: `primaryType '?'? ('&' primaryType '?'?)*`.
+   * Intersection binds tighter than union but looser than nullable.
+   */
+  private parseIntersectionType(): TypeNode {
+    let ty = this.primaryTy();
+    if (this.match('Question')) ty = { kind: 'NullableType', inner: ty, span: mergeSpans(ty.span, this.prev().span) };
+    if (this.check('Amp')) {
+      const members: TypeNode[] = [ty];
+      while (this.match('Amp')) {
+        let m = this.primaryTy();
+        if (this.match('Question')) m = { kind: 'NullableType', inner: m, span: mergeSpans(m.span, this.prev().span) };
+        members.push(m);
+      }
+      return { kind: 'IntersectionType', members, span: mergeSpans(members[0].span, members[members.length - 1].span) };
+    }
+    return ty;
+  }
+
+  /** Parse a primary type: named type with optional generic args, parenthesized type, record type, or literal type. */
   private primaryTy(): TypeNode {
     if (this.check('LeftParen')) return this.parenTy();
     if (this.check('LeftBrace')) return this.recordTy();
+
+    // String literal type: "GET"
+    if (this.check('SimpleString')) {
+      const tok = this.advance();
+      const value = this.interp(tok.text);
+      const literal = { kind: 'StringLiteral' as const, value, span: tok.span };
+      return { kind: 'LiteralTypeNode', literal, span: tok.span };
+    }
+
+    // Number literal type: 42
+    if (this.check('NumberLiteral')) {
+      const tok = this.advance();
+      const literal = { kind: 'NumberLiteral' as const, value: Number(tok.text), span: tok.span };
+      return { kind: 'LiteralTypeNode', literal, span: tok.span };
+    }
+
+    // Boolean literal type: true / false
+    if (this.check('true') || this.check('false')) {
+      const tok = this.advance();
+      const literal = { kind: 'BooleanLiteral' as const, value: tok.kind === 'true', span: tok.span };
+      return { kind: 'LiteralTypeNode', literal, span: tok.span };
+    }
+
     if (this.check('Identifier')) {
       const nt = this.advance();
       if (this.check('Less')) {
