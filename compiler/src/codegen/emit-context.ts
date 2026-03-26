@@ -49,6 +49,8 @@ export class EmitContext {
   private column = 0;
   /** Collected source map mappings. */
   private readonly mappings: SourceMapping[] = [];
+  /** Counter for extension optional-chaining temp variables (__ext_r0, __ext_r1, ...). */
+  private extTempVarCount = 0;
 
   /** Append text, updating position tracking. */
   write(text: string): void {
@@ -132,6 +134,16 @@ export class EmitContext {
   /** Current generated column (0-based). */
   getGeneratedColumn(): number {
     return this.column;
+  }
+
+  /** Get the current extension temp variable count. */
+  getExtTempVarCount(): number {
+    return this.extTempVarCount;
+  }
+
+  /** Increment the extension temp variable count. */
+  incrementExtTempVarCount(): void {
+    this.extTempVarCount++;
   }
 
   /** Update line/column tracking for the given text (no newline handling — that's done by callers). */

@@ -29,6 +29,10 @@ export interface BindingInfo {
   readonly declared: Span;
   /** Whether the binding has been referenced at least once. Mutated during checking. */
   referenced: boolean;
+  /** Whether this binding is a function parameter (subject to value semantics). */
+  readonly parameter: boolean;
+  /** Whether content mutation is allowed (only relevant when parameter is true). */
+  readonly contentMutable: boolean;
 }
 
 // ── Scope ───────────────────────────────────────────────────
@@ -164,6 +168,21 @@ export class ScopeManager {
     while (scope !== undefined) {
       const t = scope.types.get(name);
       if (t !== undefined) return t;
+      scope = scope.parent;
+    }
+    return undefined;
+  }
+
+  /**
+   * Reverse-lookup: find the type alias name for a given type.
+   * Searches from innermost to outermost scope, returning the first match.
+   */
+  findTypeName(type: Type): string | undefined {
+    let scope: Scope | undefined = this.current;
+    while (scope !== undefined) {
+      for (const [name, t] of scope.types) {
+        if (t === type) return name;
+      }
       scope = scope.parent;
     }
     return undefined;

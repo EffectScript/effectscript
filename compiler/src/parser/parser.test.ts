@@ -6,14 +6,16 @@ import type { Diagnostic } from '../diagnostics/diagnostic.js';
 import type {
   Program, Expression, Declaration, Statement, Pattern, TypeNode,
   LetDeclaration, TypeDeclaration, ImportDeclaration, ExportDeclaration,
+  ExtensionFunctionDeclaration,
   NumberLiteral, StringLiteral, BooleanLiteral, NullLiteral, Identifier,
   BinaryExpr, UnaryExpr, CallExpr, NewExpr, MemberExpr,
   IfExpr, MatchExpr, BlockExpr, ArrowFunction, TryCatchExpr,
-  ArrayExpr, RecordExpr, TemplateString,
+  ArrayExpr, RecordExpr, TemplateString, AwaitExpr, NamedArgument,
   ForStatement, WhileStatement, AssignmentStatement, ThrowStatement,
   ReturnStatement, ExpressionStatement,
-  LiteralPattern, VariantPattern, BindingPattern, WildcardPattern, RecordPattern, NullPattern,
+  LiteralPattern, VariantPattern, BindingPattern, WildcardPattern, RecordPattern, NullPattern, TuplePattern,
   NamedType, FunctionType, NullableType, UnionType, TupleType, RecordType,
+  LiteralTypeNode,
   ErrorNode,
 } from './ast.js';
 
@@ -349,11 +351,6 @@ describe('Expressions', () => {
     it('should parse a || b', () => {
       const expr = parseExpr('a || b') as BinaryExpr;
       expect(expr.operator).toBe('||');
-    });
-
-    it('should parse a |> b', () => {
-      const expr = parseExpr('a |> b') as BinaryExpr;
-      expect(expr.operator).toBe('|>');
     });
 
     it('should parse a != b', () => {
@@ -827,8 +824,104 @@ describe('Statements', () => {
   it('should parse for loop', () => {
     const stmt = parseFirst<ForStatement>('for (item in items) { process(item) }');
     expect(stmt.kind).toBe('ForStatement');
-    expect(stmt.variable.name).toBe('item');
+    expect(stmt.variable.kind).toBe('Identifier');
+    expect((stmt.variable as Identifier).name).toBe('item');
     expect((stmt.iterable as Identifier).name).toBe('items');
+    expect(stmt.range).toBeUndefined();
+  });
+
+  // ── For-loop ranges ──
+
+  it('should parse for loop with inclusive range: for (i in 0..10)', () => {
+    const stmt = parseFirst<ForStatement>('for (i in 0..10) { print(i) }');
+    expect(stmt.kind).toBe('ForStatement');
+    expect((stmt.variable as Identifier).name).toBe('i');
+    expect(stmt.range).toBeDefined();
+    expect(stmt.range!.exclusive).toBe(false);
+    expect((stmt.range!.start as NumberLiteral).value).toBe(0);
+    expect((stmt.range!.end as NumberLiteral).value).toBe(10);
+  });
+
+  it('should parse for loop with exclusive range: for (i in 0..<10)', () => {
+    const stmt = parseFirst<ForStatement>('for (i in 0..<10) { print(i) }');
+    expect(stmt.kind).toBe('ForStatement');
+    expect((stmt.variable as Identifier).name).toBe('i');
+    expect(stmt.range).toBeDefined();
+    expect(stmt.range!.exclusive).toBe(true);
+    expect((stmt.range!.start as NumberLiteral).value).toBe(0);
+    expect((stmt.range!.end as NumberLiteral).value).toBe(10);
+  });
+
+  it('should parse for loop with variable range bounds: for (i in start..<end)', () => {
+    const stmt = parseFirst<ForStatement>('for (i in start..<end) { print(i) }');
+    expect(stmt.range).toBeDefined();
+    expect(stmt.range!.exclusive).toBe(true);
+    expect((stmt.range!.start as Identifier).name).toBe('start');
+    expect((stmt.range!.end as Identifier).name).toBe('end');
+  });
+
+  it('should parse for loop with call expression range bounds: for (i in f()..<g())', () => {
+    const stmt = parseFirst<ForStatement>('for (i in f()..<g()) { print(i) }');
+    expect(stmt.range).toBeDefined();
+    expect(stmt.range!.exclusive).toBe(true);
+    expect(stmt.range!.start.kind).toBe('CallExpr');
+    expect(stmt.range!.end.kind).toBe('CallExpr');
+  });
+
+  // ── For-loop destructuring ──
+
+  it('should parse for loop with record destructuring: for ({ name, age } in users)', () => {
+    const stmt = parseFirst<ForStatement>('for ({ name, age } in users) { print(name) }');
+    expect(stmt.kind).toBe('ForStatement');
+    expect(stmt.variable.kind).toBe('RecordPattern');
+    const rp = stmt.variable as RecordPattern;
+    expect(rp.fields).toHaveLength(2);
+    expect(rp.fields[0].name.name).toBe('name');
+    expect(rp.fields[1].name.name).toBe('age');
+    expect((stmt.iterable as Identifier).name).toBe('users');
+    expect(stmt.range).toBeUndefined();
+  });
+
+  it('should parse for loop with tuple destructuring: for ((a, b) in pairs)', () => {
+    const stmt = parseFirst<ForStatement>('for ((a, b) in pairs) { print(a) }');
+    expect(stmt.kind).toBe('ForStatement');
+    expect(stmt.variable.kind).toBe('TuplePattern');
+    const tp = stmt.variable as TuplePattern;
+    expect(tp.elements).toHaveLength(2);
+    expect((tp.elements[0] as Identifier).name).toBe('a');
+    expect((tp.elements[1] as Identifier).name).toBe('b');
+    expect((stmt.iterable as Identifier).name).toBe('pairs');
+  });
+
+  it('should parse for loop with wildcard in tuple: for ((_, item) in items.withIndex())', () => {
+    const stmt = parseFirst<ForStatement>('for ((_, item) in items.withIndex()) { print(item) }');
+    expect(stmt.variable.kind).toBe('TuplePattern');
+    const tp = stmt.variable as TuplePattern;
+    expect(tp.elements).toHaveLength(2);
+    expect(tp.elements[0].kind).toBe('WildcardPattern');
+    expect((tp.elements[1] as Identifier).name).toBe('item');
+  });
+
+  it('should parse for loop with tuple pattern and method call: for ((index, item) in items.withIndex())', () => {
+    const stmt = parseFirst<ForStatement>('for ((index, item) in items.withIndex()) { print(index) }');
+    expect(stmt.variable.kind).toBe('TuplePattern');
+    const tp = stmt.variable as TuplePattern;
+    expect(tp.elements).toHaveLength(2);
+    expect((tp.elements[0] as Identifier).name).toBe('index');
+    expect((tp.elements[1] as Identifier).name).toBe('item');
+    expect(stmt.iterable.kind).toBe('CallExpr');
+  });
+
+  it('should report error for single-element tuple pattern: for ((a) in items)', () => {
+    const { diagnostics } = parseSource('for ((a) in items) { print(a) }');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('should report error for range tokens outside for-loop', () => {
+    const { diagnostics } = parseSource('let x = 0..10');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
   });
 
   it('should parse while loop', () => {
@@ -1416,5 +1509,521 @@ describe('record expression shorthand', () => {
     const { diagnostics } = parseSource(source);
     const errors = diagnostics.filter(d => d.severity === 'error');
     expect(errors.length).toBe(0);
+  });
+});
+
+// ── Async/Await ──────────────────────────────────────────────────────
+
+describe('Async/Await', () => {
+  it('should parse async arrow with expression body', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (x: number): Promise<number> => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.params).toHaveLength(1);
+    expect(fn.params[0].name.name).toBe('x');
+  });
+
+  it('should parse async arrow with block body', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (): Promise<void> => { 42 }');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.body.kind).toBe('BlockExpr');
+  });
+
+  it('should parse async generic function', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async <T>(x: T): Promise<T> => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBe(true);
+    expect(fn.typeParams).toHaveLength(1);
+    expect(fn.typeParams![0].name.name).toBe('T');
+  });
+
+  it('should parse await expression', () => {
+    const expr = parseExpr('await p');
+    expect(expr.kind).toBe('AwaitExpr');
+    expect((expr as AwaitExpr).argument.kind).toBe('Identifier');
+  });
+
+  it('should parse await wrapping call + member access', () => {
+    const expr = parseExpr('await a.b()');
+    expect(expr.kind).toBe('AwaitExpr');
+    const arg = (expr as AwaitExpr).argument;
+    expect(arg.kind).toBe('CallExpr');
+  });
+
+  it('should parse let with async arrow initializer', () => {
+    const decl = parseFirst<LetDeclaration>('let f = async (): Promise<number> => 42');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.async).toBe(true);
+  });
+
+  it('should parse export let with async arrow initializer', () => {
+    const decl = parseFirst<ExportDeclaration>('export let f = async (): Promise<number> => 42');
+    expect(decl.kind).toBe('ExportDeclaration');
+    expect(decl.declaration).toBeDefined();
+    const letDecl = decl.declaration as LetDeclaration;
+    const fn = letDecl.initializer as ArrowFunction;
+    expect(fn.async).toBe(true);
+  });
+
+  it('should parse nested await await p', () => {
+    const expr = parseExpr('await await p');
+    expect(expr.kind).toBe('AwaitExpr');
+    const inner = (expr as AwaitExpr).argument;
+    expect(inner.kind).toBe('AwaitExpr');
+    expect((inner as AwaitExpr).argument.kind).toBe('Identifier');
+  });
+
+  it('should parse await with binary operator: await a + b', () => {
+    const expr = parseExpr('await a + b');
+    // await binds tighter than binary: (await a) + b
+    expect(expr.kind).toBe('BinaryExpr');
+    const bin = expr as BinaryExpr;
+    expect(bin.left.kind).toBe('AwaitExpr');
+    expect(bin.right.kind).toBe('Identifier');
+  });
+
+  it('should error when async not followed by ( or <', () => {
+    const { diagnostics } = parseSource('async 42');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('should error when let async is used as identifier', () => {
+    const { diagnostics } = parseSource('let async = 5');
+    const errors = diagnostics.filter(d => d.severity === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('should parse non-async arrow without async flag', () => {
+    const decl = parseFirst<LetDeclaration>('let f = (x: number): number => x');
+    const fn = decl.initializer as ArrowFunction;
+    expect(fn.kind).toBe('ArrowFunction');
+    expect(fn.async).toBeUndefined();
+  });
+});
+
+// ── Reserved Keywords as Member Names ─────────────────────────────────
+
+describe('Reserved keyword member access', () => {
+  it('should parse promise.catch(handler)', () => {
+    const expr = parseExpr('promise.catch(handler)') as CallExpr;
+    expect(expr.kind).toBe('CallExpr');
+    const callee = expr.callee as MemberExpr;
+    expect(callee.kind).toBe('MemberExpr');
+    expect(callee.property.name).toBe('catch');
+    expect((callee.object as Identifier).name).toBe('promise');
+  });
+
+  it('should parse map.delete(key)', () => {
+    const expr = parseExpr('map.delete(key)') as CallExpr;
+    expect(expr.kind).toBe('CallExpr');
+    const callee = expr.callee as MemberExpr;
+    expect(callee.kind).toBe('MemberExpr');
+    expect(callee.property.name).toBe('delete');
+  });
+
+  it('should parse obj.return', () => {
+    const expr = parseExpr('obj.return') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('return');
+  });
+
+  it('should parse obj.throw', () => {
+    const expr = parseExpr('obj.throw') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('throw');
+  });
+
+  it('should parse obj.for', () => {
+    const expr = parseExpr('obj.for') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('for');
+  });
+
+  it('should parse obj.new', () => {
+    const expr = parseExpr('obj.new') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('new');
+  });
+
+  it('should parse obj.import', () => {
+    const expr = parseExpr('obj.import') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('import');
+  });
+
+  it('should parse optional chaining with keyword: obj?.catch', () => {
+    const expr = parseExpr('obj?.catch') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('catch');
+    expect(expr.optional).toBe(true);
+  });
+
+  it('should parse chained keyword members: a.catch.then', () => {
+    const expr = parseExpr('a.catch.then') as MemberExpr;
+    expect(expr.kind).toBe('MemberExpr');
+    expect(expr.property.name).toBe('then');
+    const inner = expr.object as MemberExpr;
+    expect(inner.property.name).toBe('catch');
+  });
+
+  it('should parse all keywords in member position', () => {
+    const keywords = [
+      'let', 'mut', 'match', 'if', 'else', 'type',
+      'import', 'export', 'from', 'for', 'while',
+      'try', 'catch', 'throw', 'break', 'continue', 'return',
+      'in', 'true', 'false', 'null', 'new',
+      'fun', 'this', 'async', 'await',
+    ];
+    for (const kw of keywords) {
+      const expr = parseExpr(`obj.${kw}`) as MemberExpr;
+      expect(expr.kind).toBe('MemberExpr');
+      expect(expr.property.name).toBe(kw);
+    }
+  });
+
+  it('should parse keyword as record pattern field name', () => {
+    const src = 'match x { { catch: c } => c }';
+    const program = parseOk(src);
+    const stmt = program.body[0] as ExpressionStatement;
+    const matchExpr = stmt.expression as MatchExpr;
+    const arm = matchExpr.arms[0];
+    const pat = arm.pattern as RecordPattern;
+    expect(pat.fields[0].name.name).toBe('catch');
+  });
+
+  it('should parse keyword as record expression field name', () => {
+    const expr = parseExpr('{ catch: 42 }') as RecordExpr;
+    expect(expr.kind).toBe('RecordExpr');
+    expect(expr.fields[0].name.name).toBe('catch');
+  });
+
+  // ── Async Extension Functions ────────────────────────────────────────
+
+  describe('async extension functions', () => {
+    it('should parse async fun as async extension function', () => {
+      const program = parseOk('async fun string.fetch(): Promise<string> => this');
+      expect(program.body.length).toBe(1);
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.name.name).toBe('fetch');
+      const receiverType = decl.receiverType as NamedType;
+      expect(receiverType.name.name).toBe('string');
+    });
+
+    it('should parse async fun with block body', () => {
+      const program = parseOk('async fun string.fetch(): Promise<string> => {\n  this\n}');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.body.kind).toBe('BlockExpr');
+    });
+
+    it('should parse export async fun', () => {
+      const program = parseOk('export async fun string.fetch(): Promise<string> => this');
+      const exp = program.body[0] as ExportDeclaration;
+      expect(exp.kind).toBe('ExportDeclaration');
+      const decl = exp.declaration as ExtensionFunctionDeclaration;
+      expect(decl.kind).toBe('ExtensionFunctionDeclaration');
+      expect(decl.async).toBe(true);
+      expect(decl.exported).toBe(true);
+    });
+
+    it('should parse async fun with parameters', () => {
+      const program = parseOk('async fun string.fetch(url: string): Promise<string> => this');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.async).toBe(true);
+      expect(decl.params.length).toBe(1);
+      expect(decl.params[0].name.name).toBe('url');
+    });
+
+    it('non-async fun should not have async flag', () => {
+      const program = parseOk('fun string.upper(): string => this');
+      const decl = program.body[0] as ExtensionFunctionDeclaration;
+      expect(decl.async).toBeUndefined();
+    });
+  });
+
+  // ── Literal Type Nodes ──────────────────────────────────────────
+
+  describe('LiteralTypeNode', () => {
+    it('parses string literal as type', () => {
+      const decl = parseFirst<LetDeclaration>('let x: "GET" = "GET"');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('LiteralTypeNode');
+      const ltn = decl.typeAnnotation as LiteralTypeNode;
+      expect(ltn.literal.kind).toBe('StringLiteral');
+      expect((ltn.literal as StringLiteral).value).toBe('GET');
+    });
+
+    it('parses number literal as type', () => {
+      const decl = parseFirst<LetDeclaration>('let x: 42 = 42');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('LiteralTypeNode');
+      const ltn = decl.typeAnnotation as LiteralTypeNode;
+      expect(ltn.literal.kind).toBe('NumberLiteral');
+      expect((ltn.literal as NumberLiteral).value).toBe(42);
+    });
+
+    it('parses true as type', () => {
+      const decl = parseFirst<LetDeclaration>('let x: true = true');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('LiteralTypeNode');
+      const ltn = decl.typeAnnotation as LiteralTypeNode;
+      expect(ltn.literal.kind).toBe('BooleanLiteral');
+      expect((ltn.literal as BooleanLiteral).value).toBe(true);
+    });
+
+    it('parses false as type', () => {
+      const decl = parseFirst<LetDeclaration>('let x: false = false');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('LiteralTypeNode');
+      const ltn = decl.typeAnnotation as LiteralTypeNode;
+      expect(ltn.literal.kind).toBe('BooleanLiteral');
+      expect((ltn.literal as BooleanLiteral).value).toBe(false);
+    });
+
+    it('parses union of string literals as type', () => {
+      const decl = parseFirst<LetDeclaration>('let x: "GET" | "POST" = "GET"');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('UnionType');
+      const ut = decl.typeAnnotation as UnionType;
+      expect(ut.members).toHaveLength(2);
+      expect(ut.members[0].kind).toBe('LiteralTypeNode');
+      expect(ut.members[1].kind).toBe('LiteralTypeNode');
+    });
+
+    it('parses type alias with literal union', () => {
+      const program = parseOk('type HttpMethod = "GET" | "POST" | "PUT" | "DELETE"');
+      const decl = program.body[0] as TypeDeclaration;
+      expect(decl.kind).toBe('TypeDeclaration');
+      expect(decl.name.name).toBe('HttpMethod');
+      expect(decl.variants).toHaveLength(0);
+      expect(decl.typeAlias).toBeDefined();
+      expect(decl.typeAlias!.kind).toBe('UnionType');
+      const ut = decl.typeAlias as UnionType;
+      expect(ut.members).toHaveLength(4);
+      expect(ut.members.every(m => m.kind === 'LiteralTypeNode')).toBe(true);
+    });
+
+    it('parses function param with literal type', () => {
+      const decl = parseFirst<LetDeclaration>('let f = (method: "GET" | "POST"): string => method');
+      const fn = decl.initializer as ArrowFunction;
+      expect(fn.params[0].type).toBeDefined();
+      expect(fn.params[0].type!.kind).toBe('UnionType');
+      const ut = fn.params[0].type as UnionType;
+      expect(ut.members).toHaveLength(2);
+      expect(ut.members[0].kind).toBe('LiteralTypeNode');
+    });
+
+    it('parses literal type with nullable suffix', () => {
+      const decl = parseFirst<LetDeclaration>('let x: "GET"? = null');
+      expect(decl.typeAnnotation).toBeDefined();
+      expect(decl.typeAnnotation!.kind).toBe('NullableType');
+      const nt = decl.typeAnnotation as NullableType;
+      expect(nt.inner.kind).toBe('LiteralTypeNode');
+    });
+  });
+
+  // ── Generic Constraints ───────────────────────────────────────────
+
+  describe('Generic Constraints', () => {
+    it('should parse <T: { name: string }> with record constraint', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: { name: string }>(x: T): string => x.name');
+      const arrow = decl.initializer as ArrowFunction;
+      expect(arrow.typeParams).toBeDefined();
+      expect(arrow.typeParams!.length).toBe(1);
+      const tp = arrow.typeParams![0];
+      expect(tp.name.name).toBe('T');
+      expect(tp.constraint).toBeDefined();
+      expect(tp.constraint!.kind).toBe('RecordType');
+    });
+
+    it('should parse <T: Printable> with named type constraint', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: Printable>(x: T): string => x');
+      const arrow = decl.initializer as ArrowFunction;
+      const tp = arrow.typeParams![0];
+      expect(tp.constraint).toBeDefined();
+      expect(tp.constraint!.kind).toBe('NamedType');
+      expect((tp.constraint! as NamedType).name.name).toBe('Printable');
+    });
+
+    it('should parse <T: A & B> as IntersectionType constraint', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: A & B>(x: T): string => x');
+      const arrow = decl.initializer as ArrowFunction;
+      const tp = arrow.typeParams![0];
+      expect(tp.constraint).toBeDefined();
+      expect(tp.constraint!.kind).toBe('IntersectionType');
+      const inter = tp.constraint! as import('./ast.js').IntersectionType;
+      expect(inter.members.length).toBe(2);
+      expect((inter.members[0] as NamedType).name.name).toBe('A');
+      expect((inter.members[1] as NamedType).name.name).toBe('B');
+    });
+
+    it('should parse <T: { name: string } & { age: number }> as intersection of records', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: { name: string } & { age: number }>(x: T): number => 0');
+      const arrow = decl.initializer as ArrowFunction;
+      const tp = arrow.typeParams![0];
+      expect(tp.constraint!.kind).toBe('IntersectionType');
+      const inter = tp.constraint! as import('./ast.js').IntersectionType;
+      expect(inter.members.length).toBe(2);
+      expect(inter.members[0].kind).toBe('RecordType');
+      expect(inter.members[1].kind).toBe('RecordType');
+    });
+
+    it('should parse <T, U: Array<T>> — T unconstrained, U constrained', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T, U: Array<T>>(x: T, y: U): T => x');
+      const arrow = decl.initializer as ArrowFunction;
+      expect(arrow.typeParams!.length).toBe(2);
+      expect(arrow.typeParams![0].constraint).toBeUndefined();
+      expect(arrow.typeParams![1].constraint).toBeDefined();
+      expect(arrow.typeParams![1].constraint!.kind).toBe('NamedType');
+    });
+
+    it('should parse <T: { name: string }, U: { age: number }> — both constrained', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: { name: string }, U: { age: number }>(x: T, y: U): number => 0');
+      const arrow = decl.initializer as ArrowFunction;
+      expect(arrow.typeParams!.length).toBe(2);
+      expect(arrow.typeParams![0].constraint).toBeDefined();
+      expect(arrow.typeParams![1].constraint).toBeDefined();
+    });
+
+    it('should parse <T> — no constraint (backward compatible)', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T>(x: T): T => x');
+      const arrow = decl.initializer as ArrowFunction;
+      expect(arrow.typeParams![0].constraint).toBeUndefined();
+    });
+
+    it('should parse <T: { name: string }?> — nullable constraint', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: { name: string }?>(x: T): number => 0');
+      const arrow = decl.initializer as ArrowFunction;
+      const tp = arrow.typeParams![0];
+      expect(tp.constraint).toBeDefined();
+      expect(tp.constraint!.kind).toBe('NullableType');
+    });
+
+    it('should parse constraint in type declaration: type Foo<T: Bar> = Baz(value: T)', () => {
+      const decl = parseFirst<TypeDeclaration>('type Foo<T: Bar> = Baz(value: T)');
+      expect(decl.typeParams!.length).toBe(1);
+      expect(decl.typeParams![0].constraint).toBeDefined();
+      expect(decl.typeParams![0].constraint!.kind).toBe('NamedType');
+    });
+
+    it('intersection precedence: <T: A & B | C> parses as union of (A & B) and C', () => {
+      const decl = parseFirst<LetDeclaration>('let f = <T: A & B | C>(x: T): number => 0');
+      const arrow = decl.initializer as ArrowFunction;
+      const constraint = arrow.typeParams![0].constraint!;
+      expect(constraint.kind).toBe('UnionType');
+      const union = constraint as UnionType;
+      expect(union.members.length).toBe(2);
+      expect(union.members[0].kind).toBe('IntersectionType');
+      expect((union.members[1] as NamedType).name.name).toBe('C');
+    });
+
+    it('should parse intersection type in general type position', () => {
+      // Intersection type available as a general-purpose type operator, not just constraints
+      const decl = parseFirst<LetDeclaration>('let f = (x: A & B): number => 0');
+      const arrow = decl.initializer as ArrowFunction;
+      expect(arrow.params[0].type!.kind).toBe('IntersectionType');
+    });
+
+    it('should report error for empty constraint <T: >', () => {
+      const { diagnostics } = parseSource('let f = <T: >(x: T): T => x');
+      const errors = diagnostics.filter(d => d.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ── Named Arguments ────────────────────────────────────────────────
+
+  describe('NamedArgument', () => {
+    it('should parse f(x: 10) as CallExpr with NamedArgument', () => {
+      const call = parseExpr('f(x: 10)') as CallExpr;
+      expect(call.kind).toBe('CallExpr');
+      expect(call.args).toHaveLength(1);
+      const na = call.args[0] as NamedArgument;
+      expect(na.kind).toBe('NamedArgument');
+      expect(na.name.name).toBe('x');
+      expect((na.value as NumberLiteral).value).toBe(10);
+    });
+
+    it('should parse f(1, x: 10) as positional then named', () => {
+      const call = parseExpr('f(1, x: 10)') as CallExpr;
+      expect(call.args).toHaveLength(2);
+      expect(call.args[0].kind).toBe('NumberLiteral');
+      const na = call.args[1] as NamedArgument;
+      expect(na.kind).toBe('NamedArgument');
+      expect(na.name.name).toBe('x');
+    });
+
+    it('should parse f(x: 10, y: 20) as multiple named', () => {
+      const call = parseExpr('f(x: 10, y: 20)') as CallExpr;
+      expect(call.args).toHaveLength(2);
+      const na1 = call.args[0] as NamedArgument;
+      const na2 = call.args[1] as NamedArgument;
+      expect(na1.kind).toBe('NamedArgument');
+      expect(na1.name.name).toBe('x');
+      expect(na2.kind).toBe('NamedArgument');
+      expect(na2.name.name).toBe('y');
+    });
+
+    it('should parse f(1, 2, x: 10) as positional then named', () => {
+      const call = parseExpr('f(1, 2, x: 10)') as CallExpr;
+      expect(call.args).toHaveLength(3);
+      expect(call.args[0].kind).toBe('NumberLiteral');
+      expect(call.args[1].kind).toBe('NumberLiteral');
+      expect((call.args[2] as NamedArgument).kind).toBe('NamedArgument');
+    });
+
+    it('should parse named arg with complex expression', () => {
+      const call = parseExpr('f(x: a + b)') as CallExpr;
+      expect(call.args).toHaveLength(1);
+      const na = call.args[0] as NamedArgument;
+      expect(na.kind).toBe('NamedArgument');
+      expect(na.name.name).toBe('x');
+      expect(na.value.kind).toBe('BinaryExpr');
+    });
+
+    it('should parse new Foo(x: 10) as NewExpr with NamedArgument', () => {
+      const expr = parseExpr('new Foo(x: 10)') as NewExpr;
+      expect(expr.kind).toBe('NewExpr');
+      expect(expr.args).toHaveLength(1);
+      const na = expr.args[0] as NamedArgument;
+      expect(na.kind).toBe('NamedArgument');
+      expect(na.name.name).toBe('x');
+    });
+
+    it('should parse new Foo(1, x: 10, y: 20) as mixed args', () => {
+      const expr = parseExpr('new Foo(1, x: 10, y: 20)') as NewExpr;
+      expect(expr.kind).toBe('NewExpr');
+      expect(expr.args).toHaveLength(3);
+      expect(expr.args[0].kind).toBe('NumberLiteral');
+      expect((expr.args[1] as NamedArgument).kind).toBe('NamedArgument');
+      expect((expr.args[2] as NamedArgument).kind).toBe('NamedArgument');
+    });
+
+    it('should parse f() with no args unchanged', () => {
+      const call = parseExpr('f()') as CallExpr;
+      expect(call.args).toHaveLength(0);
+    });
+
+    it('should parse f(1, 2, 3) as all positional unchanged', () => {
+      const call = parseExpr('f(1, 2, 3)') as CallExpr;
+      expect(call.args).toHaveLength(3);
+      for (const arg of call.args) {
+        expect(arg.kind).toBe('NumberLiteral');
+      }
+    });
+
+    it('should parse f({ x: 10 }) as record literal, not named arg', () => {
+      const call = parseExpr('f({ x: 10 })') as CallExpr;
+      expect(call.args).toHaveLength(1);
+      expect(call.args[0].kind).toBe('RecordExpr');
+    });
   });
 });

@@ -245,7 +245,7 @@ Options:
 `;
 
 /** Current EffectScript compiler version. */
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 // ── Main (CLI entry point) ─────────────────────────────────
 
@@ -547,7 +547,7 @@ async function handleRunCommand(args: ParsedArgs): Promise<number> {
   const config = loadConfig(cwd, fs, args.options.config);
 
   const entryFile = resolveAbsolute(args.path);
-  const tmpDir = path.join(os.tmpdir(), `esc-run-${Date.now()}`);
+  const tmpDir = nodeFs.mkdtempSync(path.join(os.tmpdir(), 'esc-run-'));
 
   const resolved = resolveConfig(config, { outDir: tmpDir, sourceMap: false });
 
@@ -583,6 +583,9 @@ async function handleRunCommand(args: ParsedArgs): Promise<number> {
   for (const file of result.outputFiles) {
     fs.writeFile(file.path, file.content);
   }
+
+  // Emit package.json with "type": "module" so Node.js treats .js as ESM
+  fs.writeFile(path.join(tmpDir, 'package.json'), '{"type":"module"}\n');
 
   // Find entry point JS file
   const entryBase = path.basename(entryFile, EFS_EXT);
@@ -653,7 +656,7 @@ function discoverFiles(
   }
 
   // No path — use include/exclude patterns from config
-  // For v0.1, use the first include pattern to determine the directory
+  // For v0.2, use the first include pattern to determine the directory
   const files: string[] = [];
   for (const pattern of config.include) {
     // Simple pattern handling: extract the directory prefix before any glob

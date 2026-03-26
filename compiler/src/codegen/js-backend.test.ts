@@ -125,7 +125,7 @@ describe('Integration: Full Pipeline', () => {
     `);
     expect(js).toContain('export const x = 42;');
     expect(js).toContain('export const add = (a, b) => a + b;');
-    expect(dts).toContain('export declare const x: number;');
+    expect(dts).toContain('export declare const x: 42;');
     expect(dts).toContain('export declare const add:');
   });
 

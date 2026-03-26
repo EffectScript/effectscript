@@ -171,20 +171,20 @@ export interface CompilerHost {
    */
   invalidateFile(path: string): void;
 
-  /** Recompile all files marked dirty via {@link invalidateFile}. In v0.1 this rebuilds everything. */
+  /** Recompile all files marked dirty via {@link invalidateFile}. In v0.2 this rebuilds everything. */
   recompileDirty(): Promise<CompilationResult>;
 
-  /** LSP stub: get symbol information at a position. Returns `null` in v0.1. */
+  /** LSP stub: get symbol information at a position. Returns `null` in v0.2. */
   getSymbolAtPosition(file: string, position: Position): SymbolInfo | null;
-  /** LSP stub: get completions at a position. Returns `[]` in v0.1. */
+  /** LSP stub: get completions at a position. Returns `[]` in v0.2. */
   getCompletionsAtPosition(file: string, position: Position): readonly CompletionItem[];
-  /** LSP stub: go-to-definition. Returns `null` in v0.1. */
+  /** LSP stub: go-to-definition. Returns `null` in v0.2. */
   getDefinitionAtPosition(file: string, position: Position): Location | null;
-  /** LSP stub: find-all-references. Returns `[]` in v0.1. */
+  /** LSP stub: find-all-references. Returns `[]` in v0.2. */
   getReferencesAtPosition(file: string, position: Position): readonly Location[];
-  /** LSP stub: hover info. Returns `null` in v0.1. */
+  /** LSP stub: hover info. Returns `null` in v0.2. */
   getHoverInfo(file: string, position: Position): HoverInfo | null;
-  /** LSP stub: signature help. Returns `null` in v0.1. */
+  /** LSP stub: signature help. Returns `null` in v0.2. */
   getSignatureHelp(file: string, position: Position): SignatureHelp | null;
 
   /**
@@ -403,11 +403,11 @@ class CompilerHostImpl implements CompilerHost {
 
   /** @inheritdoc */
   async recompileDirty(): Promise<CompilationResult> {
-    // v0.1: rebuild everything
+    // v0.2: rebuild everything
     return this.compile(this.lastFiles, this.lastOptions);
   }
 
-  // LSP stubs — all return null/empty in v0.1
+  // LSP stubs — all return null/empty in v0.2
   /** @inheritdoc */
   getSymbolAtPosition(_file: string, _position: Position): SymbolInfo | null { return null; }
   /** @inheritdoc */
@@ -428,7 +428,7 @@ class CompilerHostImpl implements CompilerHost {
 
   /** @inheritdoc */
   getTypedAST(file: string): Program | null {
-    // In v0.1 the typed AST is the same object (checker mutates in place)
+    // In v0.2 the typed AST is the same object (checker mutates in place)
     return this.astCache.get(file) ?? null;
   }
 

@@ -18,7 +18,7 @@ import { compileProject } from './pipeline.js';
 
 // ── Types ──────────────────────────────────────────────────
 
-/** Timing data for the overall compilation. Per-phase timing is deferred to post-v0.1. */
+/** Timing data for the overall compilation. Per-phase timing is deferred to post-v0.2. */
 export interface PhaseTimings {
   readonly total: { readonly durationMs: number };
   readonly [phase: string]: { readonly durationMs: number };

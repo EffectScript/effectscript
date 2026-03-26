@@ -339,6 +339,7 @@ describe('ModuleGraph — export tracking', () => {
       types: new Map(),
       values: new Map([['foo', { kind: 'primitive' as const, name: 'number' as const }]]),
       adtConstructors: new Map(),
+      extensions: new Map(),
     };
     b.setExports('/a.efs', sig);
     expect(graph.getExports('/a.efs')).toBe(sig);

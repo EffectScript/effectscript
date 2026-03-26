@@ -1,6 +1,6 @@
 # EffectScript Syntax Guide
 
-> **Version**: v0.1
+> **Version**: v0.2
 > **File extension**: `.efs`
 > **Compile target**: JavaScript (ES2020+)
 
@@ -21,7 +21,7 @@ This document is a complete reference for writing EffectScript. Every syntactic 
 7. [Pattern Matching](#7-pattern-matching)
 8. [Algebraic Data Types (ADTs)](#8-algebraic-data-types-adts)
 9. [Records](#9-records)
-10. [Arrays](#10-arrays)
+10. [Collections (Arrays, Sets, Maps)](#10-collections-arrays-sets-maps)
 11. [Strings](#11-strings)
 12. [Null Safety](#12-null-safety)
 13. [Operators](#13-operators)
@@ -126,10 +126,25 @@ Array<number>
 Array<string>
 Array<Array<number>>
 
+// Set type
+Set<string>
+Set<number>
+
+// Map type
+Map<string, number>
+Map<string, Array<number>>
+
+// Promise type
+Promise<number>
+Promise<string>
+Promise<void>
+
 // Nullable type (T or null)
 string?
 number?
 Array<string>?
+Set<string>?
+Map<string, number>?
 
 // Union type
 string | number
@@ -147,7 +162,83 @@ string | number | boolean
 // Record type (structural)
 { name: string, age: number }
 { name: string, age?: number }     // optional field
+
+// Intersection type (merges record types)
+{ name: string } & { age: number }    // equivalent to { name: string, age: number }
 ```
+
+### Literal types
+
+Literal types represent a single concrete value. They are subtypes of their base primitive type.
+
+```
+// String literal types
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE"
+
+// Number literal types
+type DiceRoll = 1 | 2 | 3 | 4 | 5 | 6
+
+// Boolean literal types
+type True = true
+type False = false
+```
+
+Literal types enable exhaustive pattern matching on string and number values.
+
+#### Const inference
+
+Immutable `let` bindings infer literal types by default. Mutable `let mut` bindings widen to the base primitive type.
+
+```
+let x = "hello"       // type: "hello" (literal)
+let mut y = "hello"   // type: string (widened — value can change)
+
+let n = 42            // type: 42
+let mut m = 42        // type: number
+
+let t = true          // type: true
+let mut b = true      // type: boolean
+```
+
+When an explicit type annotation is present, the annotation takes precedence:
+
+```
+let x: string = "hello"   // type: string (annotation wins)
+let y = "hello"            // type: "hello" (inferred literal)
+```
+
+#### Assignability
+
+Literal types are subtypes of their base primitive:
+
+```
+let x = "GET"              // type: "GET"
+let y: string = x          // OK — "GET" is assignable to string
+let z: "GET" = y           // Error — string is not assignable to "GET"
+```
+
+#### Array widening
+
+Array literals widen their element types to the common base type unless an annotation is provided:
+
+```
+let methods = ["GET", "POST"]                        // type: Array<string> (widened)
+let methods: Array<"GET" | "POST"> = ["GET", "POST"] // OK with annotation
+```
+
+#### Union simplification
+
+A primitive type absorbs its literal subtypes in a union:
+
+```
+type T = string | "hello"    // simplifies to string
+type U = number | 42         // simplifies to number
+type V = boolean | true      // simplifies to boolean
+```
+
+`true | false` collapses to `boolean`.
+
+**Intersection types** use `&` to combine record types into a single type with all fields. Intersection binds tighter than union (`|`) but looser than nullable (`?`). Only record type intersections are supported.
 
 ### Named type aliases
 
@@ -155,9 +246,11 @@ string | number | boolean
 type User = { name: string, age: number }
 type Config = { host: string, port?: number }
 export type Point = { x: number, y: number }
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE"
+type DiceRoll = 1 | 2 | 3 | 4 | 5 | 6
 ```
 
-Named record type aliases are structural — they are erased in JS output and emitted as `export type` in `.d.ts` files.
+Named type aliases (both record types and literal unions) are structural — they are erased in JS output and emitted as `export type` in `.d.ts` files.
 
 ### Algebraic data types (ADTs)
 
@@ -208,12 +301,187 @@ greet()        // "hello world"
 greet("Alice") // "hello Alice"
 ```
 
+### Named arguments
+
+At call sites, arguments can be passed by name using `name: value` syntax. Positional arguments must come before named arguments.
+
+```
+let createUser = (name: string, admin: boolean = false, verified: boolean = false, age: number = 0): string => name
+
+// Positional (always works)
+createUser("Alice", true, false, 30)
+
+// Named arguments — any order
+createUser("Alice", admin: true, age: 30)
+
+// All named
+createUser(name: "Alice", age: 30, verified: true)
+```
+
+Named arguments can skip defaulted parameters — the skipped parameters receive their default values:
+
+```
+let f = (a: number, b: number = 0, c: number = 0): number => a + b + c
+f(1, c: 3)  // b gets default 0 → compiles to f(1, undefined, 3)
+f(1, b: 2)  // c omitted entirely → compiles to f(1, 2)
+```
+
+Named arguments work with `new` expressions, generic functions, and extension functions:
+
+```
+new User(name: "Alice", age: 30)
+
+let swap = <A, B>(first: A, second: B): B => second
+swap(second: "hello", first: 42)  // compiles to swap(42, "hello")
+
+15.clamp(max: 10, min: 0)  // names the extension params
+```
+
+**Errors:**
+- `E253`: Positional argument cannot follow named argument
+- `E254`: Unknown parameter name
+- `E255`: Parameter already provided (either duplicate name or positional + named for the same parameter)
+
+**Distinction from records:** `f(x: 10)` is a named argument; `f({ x: 10 })` is a record literal as a positional argument.
+
 ### Generic functions
 
 ```
 let identity = <T>(x: T): T => x
 let first = <T, U>(a: T, b: U): T => a
 ```
+
+### Generic constraints
+
+Type parameters can be constrained using `:` to require a specific shape. Only types satisfying the constraint can be used as type arguments. Inside the function body, the constrained generic provides access to the constraint's fields.
+
+```
+// Structural constraint — T must have a `name` field
+let getName = <T: { name: string }>(item: T): string => item.name
+
+// Named type constraint
+type Printable = { toString: () => string }
+let stringify = <T: Printable>(value: T): string => value.toString()
+
+// Multiple constraints via intersection
+let process = <T: { name: string } & { age: number }>(item: T): string => {
+  "${item.name} is ${item.age}"
+}
+
+// Constraint referencing another type parameter
+let wrap = <T, U: Array<T>>(item: T, container: U): U => container
+
+// Multiple constrained type parameters
+let combine = <A: { value: number }, B: { value: number }>(a: A, b: B): number => {
+  a.value + b.value
+}
+```
+
+Constraint violations produce E240 at call sites:
+
+```
+let getName = <T: { name: string }>(item: T): string => item.name
+getName(42)  // Error: Type 'number' does not satisfy constraint '{ name: string }'
+```
+
+Unconstrained generics have no known fields (E209 on field access).
+
+### Constrained ADT type parameters
+
+ADT type declarations can also have constraints. The constraint is validated when constructing variants:
+
+```
+type Container<T: { id: string }> = Boxed(value: T) | Empty
+
+let c = Boxed({ id: "abc", data: 42 })  // OK
+let d = Boxed(42)                         // Error E240
+```
+
+In `.d.ts` output, `:` constraints emit as `extends`:
+
+```
+// EffectScript: <T: { name: string }>
+// DTS output:   <T extends { name: string }>
+```
+
+### Value parameter semantics
+
+Function parameters are **deeply immutable** by default. The type checker rejects any attempt to mutate a parameter's value, including direct property assignment and calls to known mutating methods. This has zero runtime cost -- enforcement is purely compile-time.
+
+```
+// Immutable by default -- mutation is rejected
+let process = (items: Array<number>): void => {
+  items.push(42)          // E240: Cannot call mutating method 'push' on immutable parameter 'items'
+  items.sort()            // E240: Same for sort, pop, shift, unshift, reverse, splice, fill
+}
+
+let update = (user: { name: string }): void => {
+  user.name = "Bob"       // E241: Cannot mutate immutable parameter 'user'
+}
+```
+
+To allow mutation, use the `mut` keyword before the parameter name:
+
+```
+let sort = (mut items: Array<number>): void => {
+  items.sort()            // OK -- parameter is explicitly mutable
+  items.push(42)          // OK
+}
+
+let resetName = (mut user: { name: string }): void => {
+  user.name = "Anonymous" // OK
+}
+```
+
+**`mut` does not allow reassignment.** The `mut` keyword allows content mutation but not rebinding the parameter:
+
+```
+let example = (mut items: Array<number>): void => {
+  items.push(42)          // OK -- content mutation
+  items = [1, 2, 3]       // E202 -- reassignment not allowed
+}
+```
+
+Deep enforcement traces through member chains to the root binding:
+
+```
+let process = (config: { db: { host: string } }): void => {
+  config.db.host = "localhost"  // E241 -- deep mutation of immutable parameter
+}
+```
+
+Set and Map parameters also enforce immutability:
+
+```
+let process = (names: Set<string>, scores: Map<string, number>): void => {
+  names.add("x")          // E240
+  scores.set("x", 1)      // E240
+  names.has("x")           // OK -- non-mutating
+  scores.get("x")          // OK -- non-mutating
+}
+```
+
+**Aliasing escapes enforcement.** Assigning a parameter to a local variable creates a separate binding:
+
+```
+let process = (items: Array<number>): void => {
+  let alias = items
+  alias.push(42)           // OK -- alias is a local binding, not a parameter
+}
+```
+
+**Closures inherit parameter immutability.** If a parameter is visible in a closure's scope, mutations are rejected:
+
+```
+let process = (items: Array<number>): () => void => {
+  let mutator = (): void => { items.push(42) }  // E240 -- parameter still immutable in closure
+  mutator
+}
+```
+
+Non-mutating methods (map, filter, forEach, includes, at, slice) and property reads (length) are always allowed on immutable parameters.
+
+`mut` has no runtime representation -- it compiles identically to a regular parameter and is not reflected in `.d.ts` output.
 
 ### Return type annotation
 
@@ -259,6 +527,84 @@ let findFirst = (nums: Array<number>, target: number): number => {
 ```
 
 `return` exits the enclosing function immediately. Bare `return` (no value) has type `void`.
+
+### Async functions
+
+Async functions use the `async` keyword before the parameter list and return `Promise<T>`.
+
+```
+let fetchUser = async (id: string): Promise<User> => {
+  let response = await fetch("/api/users/${id}")
+  await response.json()
+}
+```
+
+#### Expression body
+
+```
+let double = async (x: number): Promise<number> => await compute(x)
+```
+
+#### Return type inference
+
+When no return type annotation is provided, the checker infers `Promise<T>` from the body type.
+
+```
+let f = async (x: number) => x * 2     // inferred: (number) => Promise<number>
+```
+
+#### Exported async function
+
+```
+export let fetchData = async (url: string): Promise<string> => {
+  let response = await fetch(url)
+  await response.text()
+}
+```
+
+#### `await` expression
+
+`await` unwraps a `Promise<T>` to `T`. It is only valid inside an async function body.
+
+```
+let f = async (): Promise<number> => {
+  let p = async (): Promise<number> => 42
+  let result = await p()      // result: number
+  result + 1
+}
+```
+
+**Precedence**: `await` binds at unary level. `await a + b` is `(await a) + b`.
+
+**Restrictions**:
+- `await` outside async function → error E231
+- `await` on non-Promise type → error E232 (except `Any`)
+- Async function with non-`Promise<T>` return type → error E230
+- No top-level `await` — use an async IIFE: `(async () => { ... })()`
+
+#### Async `return` semantics
+
+Inside an async function, `return expr` checks `expr` against the inner type `T` of `Promise<T>`. Both `T` and `Promise<T>` are accepted (JavaScript auto-awaits returned promises).
+
+```
+let compute = async (): Promise<number> => 42
+let f = async (): Promise<number> => {
+  return compute()     // OK — Promise<number> auto-awaited
+  0
+}
+```
+
+#### Async attempt
+
+When `attempt` is called with an async function, it returns `Promise<Result<T, Error>>`:
+
+```
+let result = await attempt(async (): Promise<string> => {
+  let response = await fetch(url)
+  await response.text()
+})
+// result: Result<string, Error>
+```
 
 ### Lambda parameter types
 
@@ -505,7 +851,7 @@ match n {
 
 ### Exhaustiveness
 
-The compiler enforces exhaustive matching. For ADTs, all variants must be covered. For nullable types, both the value and `null` must be handled.
+The compiler enforces exhaustive matching. For ADTs, all variants must be covered. For nullable types, both the value and `null` must be handled. For literal union types, all literal members must be covered.
 
 ```
 type Color = Red | Green | Blue
@@ -516,6 +862,36 @@ match color {
   Green => "g"
 }
 ```
+
+#### Exhaustive match on literal unions
+
+```
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE"
+
+let describe = (method: HttpMethod): string =>
+  match method {
+    "GET" => "Read"
+    "POST" => "Create"
+    "PUT" => "Update"
+    "DELETE" => "Remove"
+  }
+// Exhaustive — all literal members covered
+```
+
+Number literal unions also support exhaustive matching:
+
+```
+type Coin = 1 | 5 | 10 | 25
+let value = (coin: Coin): string =>
+  match coin {
+    1 => "penny"
+    5 => "nickel"
+    10 => "dime"
+    25 => "quarter"
+  }
+```
+
+Bare primitives (`string`, `number`) have infinite domains and require a wildcard.
 
 Use `_` as a catch-all:
 
@@ -564,6 +940,9 @@ type Option<T> = Some(value: T) | None
 ```
 type Result<T, E> = Ok(value: T) | Err(error: E)
 type Tree<T> = Leaf(value: T) | Node(left: Tree<T>, right: Tree<T>)
+
+// With constraints
+type Container<T: { id: string }> = Boxed(value: T) | Empty
 ```
 
 ### Constructing ADT values
@@ -664,7 +1043,7 @@ let empty = {}
 
 ---
 
-## 10. Arrays
+## 10. Collections (Arrays, Sets, Maps)
 
 ### Array literals
 
@@ -675,7 +1054,7 @@ let empty: Array<number> = []
 let nested = [[1, 2], [3, 4]]
 ```
 
-### Type annotation
+### Array type annotation
 
 ```
 let nums: Array<number> = [1, 2, 3]
@@ -693,13 +1072,26 @@ nums.length              // 3
 // Transformations (return new arrays)
 nums.map((n: number) => n * 2)          // [2, 4, 6]
 nums.filter((n: number) => n > 1)       // [2, 3]
+nums.flatMap((n: number): Array<number> => [n, n * 2])  // [1, 2, 2, 4, 3, 6]
+
+// Queries
+nums.first()             // 1 (returns number?, null if empty)
+nums.last()              // 3 (returns number?, null if empty)
+nums.find((n: number): boolean => n > 2)   // 3 (returns number?, null if not found)
+nums.findIndex((n: number): boolean => n > 2) // 2
+nums.indexOf(2)          // 1
+nums.includes(2)         // true
+nums.isEmpty()           // false
+nums.at(0)               // 1 (returns number?, null if out of bounds)
+nums.every((n: number): boolean => n > 0)  // true
+nums.some((n: number): boolean => n > 5)   // false
+
+// Reduction
+nums.reduce((acc: number, n: number): number => acc + n, 0)  // 6 (JS arg order)
+nums.fold(0, (acc: number, n: number): number => acc + n)     // 6 (functional arg order)
 
 // Iteration
 nums.forEach((n: number) => print(n))
-
-// Queries
-nums.includes(2)         // true
-nums.at(0)               // 1 (returns number?, null if out of bounds)
 
 // Mutation (only on let mut arrays)
 let mut items: Array<number> = [1, 2]
@@ -707,7 +1099,114 @@ items.push(3)            // adds to end
 items.unshift(0)         // adds to start
 items.pop()              // removes from end, returns number?
 items.shift()            // removes from start, returns number?
+items.sort()             // sorts in place (string comparison)
+items.sort((a: number, b: number): number => a - b)  // sorts with comparator
 ```
+
+### Set construction and methods
+
+Sets are constructed using the `Set.of(array)` factory method. There is no set literal syntax.
+
+```
+// Create a Set from an array
+let names = Set.of(["alice", "bob", "carol"])
+let empty: Set<string> = Set.of([])
+
+// Type annotation
+let s: Set<number> = Set.of([1, 2, 3])
+```
+
+```
+let s = Set.of(["a", "b", "c"])
+
+// Properties
+s.size                   // 3
+
+// Queries
+s.has("a")               // true
+
+// Conversion
+s.toArray()              // ["a", "b", "c"] (Array<string>)
+
+// Transformations (return new Sets)
+s.map((x: string): number => x.length)       // Set<number>
+s.filter((x: string): boolean => x != "a")   // Set<string>
+s.union(Set.of(["d"]))                        // Set<string> with a, b, c, d
+s.intersect(Set.of(["a", "d"]))              // Set<string> with a
+s.difference(Set.of(["a"]))                  // Set<string> with b, c
+
+// Iteration
+s.forEach((x: string) => print(x))
+
+// Mutation (only on let mut Sets)
+let mut ms: Set<string> = Set.of(["a"])
+ms.add("b")             // void (mutates in place)
+ms.delete("a")          // boolean (true if removed)
+ms.clear()              // void (removes all elements)
+```
+
+### Iterating over a Set
+
+Sets are not directly iterable with `for-in`. Convert to an array first:
+
+```
+let names = Set.of(["alice", "bob"])
+for (name in names.toArray()) {
+  print(name)
+}
+```
+
+### Map construction and methods
+
+Maps are constructed using the `Map.of()` factory method. There is no map literal syntax.
+
+```
+// Create an empty Map
+let m: Map<string, number> = Map.of()
+
+// Type annotation
+let scores: Map<string, number> = Map.of()
+```
+
+```
+let m: Map<string, number> = Map.of()
+
+// Properties
+m.size                   // 0
+
+// Queries
+m.has("alice")           // false
+m.get("alice")           // null (returns number? — nullable, since key may not exist)
+
+// Key/value extraction (returns Arrays)
+m.keys()                 // Array<string>
+m.values()               // Array<number>
+m.entries()              // Array<(string, number)>
+
+// Transformation
+m.map((v: number, k: string): number => v * 2)  // Map<string, number> (callback order: value, key)
+
+// Iteration
+m.forEach((v: number, k: string): void => print(k))  // callback order: value, key (matches JS)
+
+// Mutation (only on let mut Maps)
+let mut ms: Map<string, number> = Map.of()
+ms.set("alice", 100)    // void (mutates in place)
+ms.delete("alice")       // boolean (true if removed)
+ms.clear()               // void (removes all entries)
+```
+
+**Note on Map.get()**: `Map.get(key)` returns `V?` (nullable) because the key might not exist. Always handle the null case:
+
+```
+let m: Map<string, number> = Map.of()
+let score = m.get("alice")
+if (score != null) {
+  print(score)   // score is narrowed to number here
+}
+```
+
+**Note on Map callback order**: `Map.forEach` and `Map.map` use `(value, key)` callback order, matching JavaScript's `Map.prototype.forEach`. This is intentional for direct codegen passthrough.
 
 ### Iterating with for-in
 
@@ -884,33 +1383,22 @@ let describe = (x: number?): string => {
 | `??` | Null coalescing — returns left if non-null, otherwise right |
 | `?.` | Optional chaining — returns null if left is null |
 
-### Pipe operator
-
-The pipe operator `|>` enables left-to-right function composition.
-
-```
-let result = value |> transform |> format
-
-// Equivalent to:
-let result = format(transform(value))
-```
-
-Longer chains:
-
-```
-let output = data
-  |> parse
-  |> validate
-  |> transform
-  |> serialize
-```
-
 ### Unary operators
 
 | Operator | Description | Example |
 |----------|-------------|---------|
 | `-` | Arithmetic negation | `-x` |
 | `!` | Logical NOT | `!flag` |
+
+### Type operators
+
+| Operator | Context | Description |
+|----------|---------|-------------|
+| `?` | Type annotation | Nullable type: `string?` means `string \| null` |
+| `\|` | Type annotation | Union type: `string \| number` |
+| `&` | Type annotation | Intersection type: `{ name: string } & { age: number }` |
+
+`&` binds tighter than `|` but looser than `?`: `A? & B | C` parses as `(A? & B) | C`.
 
 ### Assignment
 
@@ -927,11 +1415,10 @@ Assignment is a statement, not an expression. Only works with `let mut` bindings
 2. `&&`
 3. `==`, `!=`, `<`, `>`, `<=`, `>=`
 4. `??`
-5. `|>` (pipe)
-6. `+`, `-`
-7. `*`, `/`, `%`
-8. Unary (`!`, `-`)
-9. Member access (`.`, `?.`), function call, `new`
+5. `+`, `-`
+6. `*`, `/`, `%`
+7. Unary (`!`, `-`)
+8. Member access (`.`, `?.`), function call, `new`
 
 ---
 
@@ -1068,6 +1555,89 @@ for (item in items) {
 - The loop variable is **immutable** within the body.
 - The iterable must be an `Array<T>`.
 
+### Range loops
+
+Iterate over numeric ranges using `..` (inclusive) and `..<` (exclusive).
+
+```
+// Exclusive range (0 to 9)
+for (i in 0..<10) {
+  print(i)
+}
+
+// Inclusive range (0 to 10)
+for (i in 0..10) {
+  print(i)
+}
+
+// Variable bounds
+let n = items.length
+for (i in 0..<n) {
+  print(items.at(i))
+}
+```
+
+- Range bounds must be `number` type.
+- The loop variable is bound as `number` and is **immutable** within the body.
+- Ranges compile to efficient C-style `for` loops: `for (let i = 0; i < 10; i++)`.
+- Both bounds are evaluated once before the loop starts (complex end expressions are captured in a temporary variable).
+- Empty ranges (e.g., `5..<5`) produce no iterations.
+- Backwards ranges (e.g., `10..<0`) produce no iterations (no automatic decrement).
+
+### Destructuring in for loops
+
+#### Record destructuring
+
+```
+type User = { name: string, age: number }
+let users: Array<User> = [{ name: "Alice", age: 30 }, { name: "Bob", age: 25 }]
+
+for ({ name, age } in users) {
+  print("${name} is ${age}")
+}
+```
+
+- The iterable must be `Array<RecordType>`.
+- Partial destructuring is allowed (only bind the fields you need).
+- Unknown fields produce a type error.
+
+#### Tuple destructuring
+
+```
+let items = ["a", "b", "c"]
+for ((index, item) in items.withIndex()) {
+  print("${index}: ${item}")
+}
+```
+
+- The iterable must be `Array<TupleType>`.
+- The number of pattern elements must match the tuple arity.
+- Use `_` to discard a position: `for ((_, item) in items.withIndex())`.
+
+#### Nullable element restriction
+
+Destructuring a nullable array element is not allowed. The array element type must be a non-nullable record or tuple:
+
+```
+// ERROR: Cannot destructure type 'User?' — expected a record or tuple
+let users: Array<User?> = [{ name: "Alice", age: 30 }, null]
+for ({ name } in users) { ... }
+```
+
+### Indexed iteration with `withIndex()`
+
+The `withIndex()` method on arrays returns `Array<(number, T)>` — an array of `(index, element)` tuples.
+
+```
+let items = ["a", "b", "c"]
+for ((index, item) in items.withIndex()) {
+  print("${index}: ${item}")
+}
+```
+
+- When `withIndex()` is the direct iterable of a for-loop, the emitter optimizes it to `.entries()` instead of creating an intermediate array.
+- In general expression context, `items.withIndex()` compiles to `items.map((v, i) => [i, v])`.
+
 ### While loop
 
 ```
@@ -1145,7 +1715,15 @@ These are available in every EffectScript file without importing.
 | `Ok` | `<T, E>(value: T) => Result<T, E>` | Construct a success result |
 | `Err` | `<T, E>(error: E) => Result<T, E>` | Construct an error result |
 | `attempt` | `<T>(f: () => T) => Result<T, Error>` | Wrap a throwing function into a Result |
+| `attempt` (async) | `<T>(f: () => Promise<T>) => Promise<Result<T, Error>>` | Async overload — wraps async function into a Result |
 | `print` | `(value: Any) => void` | Print to console (compiles to `console.log`) |
+
+### Companion Objects
+
+| Name | Method | Signature | Description |
+|------|--------|-----------|-------------|
+| `Set` | `of(items)` | `<T>(Array<T>) => Set<T>` | Create a Set from an array |
+| `Map` | `of()` | `() => Map<Any, Any>` | Create an empty Map |
 
 ---
 
@@ -1162,9 +1740,55 @@ These are available in every EffectScript file without importing.
 | `shift()` | `() => T?` | Remove from start (nullable) |
 | `map(fn)` | `<U>((T) => U) => Array<U>` | Transform each element |
 | `filter(fn)` | `((T) => boolean) => Array<T>` | Keep elements matching predicate |
+| `flatMap(fn)` | `<U>((T) => Array<U>) => Array<U>` | Map then flatten |
 | `forEach(fn)` | `((T) => void) => void` | Execute side effect for each element |
 | `includes(item)` | `(T) => boolean` | Check if array contains item |
 | `at(index)` | `(number) => T?` | Get element at index (nullable) |
+| `first()` | `() => T?` | First element (nullable — null if empty) |
+| `last()` | `() => T?` | Last element (nullable — null if empty) |
+| `find(fn)` | `((T) => boolean) => T?` | First element matching predicate (nullable) |
+| `findIndex(fn)` | `((T) => boolean) => number` | Index of first match (-1 if none) |
+| `indexOf(item)` | `(T) => number` | Index of item (-1 if not found) |
+| `every(fn)` | `((T) => boolean) => boolean` | True if all elements match |
+| `some(fn)` | `((T) => boolean) => boolean` | True if any element matches |
+| `isEmpty()` | `() => boolean` | True if array has no elements |
+| `reduce(fn, init)` | `<U>((U, T) => U, U) => U` | Reduce with JS arg order (fn, init) |
+| `fold(init, fn)` | `<U>(U, (U, T) => U) => U` | Reduce with functional arg order (init, fn) |
+| `sort(fn?)` | `((T, T) => number)? => void` | Sort in place (optional comparator) |
+| `withIndex()` | `() => Array<(number, T)>` | Array of (index, element) tuples |
+
+### Set<T> methods
+
+| Method / Property | Signature | Description |
+|-------------------|-----------|-------------|
+| `size` | `number` | Number of elements |
+| `has(item)` | `(T) => boolean` | Check if set contains item |
+| `add(item)` | `(T) => void` | Add element (mutation) |
+| `delete(item)` | `(T) => boolean` | Remove element (returns true if removed) |
+| `clear()` | `() => void` | Remove all elements (mutation) |
+| `toArray()` | `() => Array<T>` | Convert to array |
+| `map(fn)` | `<U>((T) => U) => Set<U>` | Transform each element |
+| `filter(fn)` | `((T) => boolean) => Set<T>` | Keep elements matching predicate |
+| `forEach(fn)` | `((T) => void) => void` | Execute side effect for each element |
+| `union(other)` | `(Set<T>) => Set<T>` | Set union |
+| `intersect(other)` | `(Set<T>) => Set<T>` | Set intersection |
+| `difference(other)` | `(Set<T>) => Set<T>` | Set difference (elements in this but not other) |
+
+### Map<K, V> methods
+
+| Method / Property | Signature | Description |
+|-------------------|-----------|-------------|
+| `size` | `number` | Number of entries |
+| `get(key)` | `(K) => V?` | Get value by key (nullable — null if key missing) |
+| `has(key)` | `(K) => boolean` | Check if key exists |
+| `set(key, value)` | `(K, V) => void` | Set key-value pair (mutation) |
+| `delete(key)` | `(K) => boolean` | Remove entry (returns true if removed) |
+| `clear()` | `() => void` | Remove all entries (mutation) |
+| `keys()` | `() => Array<K>` | All keys as array |
+| `values()` | `() => Array<V>` | All values as array |
+| `entries()` | `() => Array<(K, V)>` | All entries as array of tuples |
+| `forEach(fn)` | `((V, K) => void) => void` | Execute for each entry (value, key order) |
+| `map(fn)` | `<U>((V, K) => U) => Map<K, U>` | Transform values (value, key order) |
 
 ### String methods
 
@@ -1220,7 +1844,16 @@ import { useState } from "react"
 import React, { Component } from "react"
 ```
 
-External packages resolve through Node.js module resolution. Type information is read from `.d.ts` declaration files.
+External packages resolve through Node.js module resolution. Type information is read from `.d.ts` declaration files (including `.d.cts` and `.d.mts` variants).
+
+Packages that use `export = X` (the CommonJS-style TypeScript default export pattern) are supported. The `export =` value is treated as the default import, and any merged namespace members are exposed as named imports:
+
+```
+// Works with packages like react, express, lodash, axios
+import React from "react"
+import express, { Router } from "express"
+import _ from "lodash"
+```
 
 ### Using `new` for JS classes
 
@@ -1229,6 +1862,22 @@ EffectScript does not have its own class syntax, but you can construct JS/TS cla
 ```
 let err = new Error("something went wrong")
 let map = new Map<string, number>()
+```
+
+### Reserved keywords as member names
+
+Reserved keywords (like `catch`, `delete`, `throw`, `return`) are valid in member access position after `.` and `?.`. This is essential for calling JS methods with keyword names:
+
+```
+promise.catch((e: Any): void => print(e))
+map.delete("key")
+obj?.return
+```
+
+Keywords are also valid as record field names when used with a colon:
+
+```
+let handlers = { catch: errorHandler, delete: removeItem }
 ```
 
 ### Type mapping
@@ -1240,7 +1889,7 @@ Types from `.d.ts` files are mapped to EffectScript types:
 - `Array<T>`, `T[]` → `Array<T>`
 - `Record<K, V>` → `{ [key: K]: V }`
 - Interfaces / object types → record types
-- Enums → union types or ADTs
+- Enums → record types with named member fields (enables `Direction.Up` access)
 - `any`, `unknown` → `Any`
 
 ---
@@ -1255,21 +1904,34 @@ Types from `.d.ts` files are mapped to EffectScript types:
 | `let mut x = 1` | `let x = 1;` |
 | `==` | `===` |
 | `!=` | `!==` |
-| `x \|> f \|> g` | `g(f(x))` |
 | `print(x)` | `console.log(x)` |
 | `"hello ${name}"` | `` `hello ${name}` `` |
 | `Ok(42)` | `{ _tag: "Ok", value: 42 }` |
 | `Red` (fieldless ADT) | `Object.freeze({ _tag: "Red" })` |
 | `Circle(5)` (fielded ADT) | `Circle(5)` → `{ _tag: "Circle", radius: 5 }` |
 | `import { a } from "./mod"` | `import { a } from "./mod.js";` |
+| `Set.of([1, 2])` | `new Set([1, 2])` |
+| `Map.of()` | `new Map()` |
+| `s.toArray()` | `Array.from(s)` |
+| `m.get("key")` | `m.get("key") ?? null` |
+| `m.keys()` | `Array.from(m.keys())` |
+| `arr.first()` | `arr[0] ?? null` |
+| `arr.last()` | `arr.at(-1) ?? null` |
+| `arr.fold(init, fn)` | `arr.reduce(fn, init)` |
+| `arr.isEmpty()` | `arr.length === 0` |
+| `type T = "A" \| "B"` | (erased — no JS output) |
+| `async (x) => ...` | `async (x) => ...` |
+| `await expr` | `await expr` |
+| `attempt(async () => ...)` | `__attempt_async(async () => ...)` |
 
 ### Declaration files (.d.ts)
 
 Only exported declarations are emitted:
 - Functions → `export declare const name: (params) => returnType;`
-- Constants → `export declare const name: Type;`
+- Constants → `export declare const name: Type;` (literal type for immutable, primitive for mutable)
 - ADTs → interfaces with `_tag` discriminant + union type + constructor declarations
 - Named record types → `export type Name = { ... };`
+- Literal union type aliases → `export type Name = "A" | "B";`
 
 ### Source maps
 
@@ -1289,12 +1951,16 @@ Only exported declarations are emitted:
 8. **`{ }` alone** parses as an empty record, not an empty block. A block requires at least one `let` or statement: `{ let x = 1; x }`.
 9. **Record shorthand**: `{ name }` is equivalent to `{ name: name }`.
 10. **Recursive functions** require an explicit return type annotation.
-11. **Lambda parameters** always require explicit type annotations (no contextual inference).
+11. **Lambda parameters** can infer types from context (bidirectional type inference), but explicit annotations are always valid.
 12. **`??` cannot be mixed with `&&` or `||`** without explicit parentheses (E117).
 13. **Immutable by default** — `let` bindings cannot be reassigned; use `let mut` for mutability.
 14. **No `var`** — only `let` and `let mut`.
 15. **Double quotes only** — strings use `"..."`, not `'...'` or backticks.
 16. **`new` is for JS interop only** — constructing external JS/TS classes.
+17. **`async` and `await` are reserved keywords** — cannot be used as identifiers.
+18. **`await` is only valid inside `async` functions** — no top-level `await`.
+19. **Async functions must return `Promise<T>`** — explicit or inferred.
+20. **Reserved keywords are valid after `.`** — `obj.catch`, `obj?.delete`, `{ catch: handler }` are all valid. Keywords cannot be used as standalone identifiers or shorthand record fields.
 
 ---
 

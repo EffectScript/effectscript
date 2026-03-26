@@ -11,6 +11,12 @@ EffectScript brings ideas from Kotlin and Rust — immutability by default, null
 - **Algebraic data types** — define variants with named or positional fields
 - **Pattern matching** — exhaustive `match` expressions with destructuring
 - **Expression-oriented** — `if`/`else`, `match`, `try`/`catch`, and blocks all return values
+- **Extension functions** — add methods to existing types with `fun Type.method()`, Kotlin-style
+- **Async/await** — native `async` functions with `Promise<T>` types and `await` expressions
+- **Named arguments** — call functions with `name: value` syntax for readability; skip defaulted parameters
+- **Generic constraints** — bound type parameters with `<T: { name: string }>` for type-safe generic code
+- **Built-in collections** — `Set<T>` and `Map<K, V>` with null-safe methods, plus expanded `Array<T>` methods
+- **Enhanced for loops** — range loops (`for (i in 0..<10)`), record/tuple destructuring, and `withIndex()` iteration
 - **TypeScript interop** — import `.d.ts` types directly; generates `.js` + `.d.ts` output
 - **Familiar syntax** — if you know TypeScript, you can read EffectScript
 

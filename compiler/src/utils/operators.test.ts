@@ -19,6 +19,9 @@ describe('operators.ts', () => {
   it('getOperatorPrecedence returns correct value for known operators', () => {
     expect(getOperatorPrecedence('??')).toBe(OPERATOR_PRECEDENCE['??']);
     expect(getOperatorPrecedence('+')).toBe(OPERATOR_PRECEDENCE['+']);
-    expect(getOperatorPrecedence('|>')).toBe(OPERATOR_PRECEDENCE['|>']);
+  });
+
+  it('|> is not a recognized operator (removed in v0.2)', () => {
+    expect(getOperatorPrecedence('|>')).toBe(0);
   });
 });

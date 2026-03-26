@@ -49,6 +49,36 @@ export const D = {
   E216: 'E216',
   E217: 'E217',
 
+  // ── Checker extension functions (E220–E223) ──────────────────────────
+  E220: 'E220',
+  E221: 'E221',
+  E222: 'E222',
+  E223: 'E223',
+
+  // ── Checker async/await (E230–E232) ──────────────────────────────────
+  E230: 'E230',
+  E231: 'E231',
+  E232: 'E232',
+
+  // ── Checker value parameter semantics (E240–E241) ──────────────────
+  E240: 'E240',
+  E241: 'E241',
+
+  // ── Checker generic constraints (E250–E251) ──────────────────────
+  E250: 'E250',
+  E251: 'E251',
+
+  // ── Checker named arguments (E253–E255) ─────────────────────────
+  E253: 'E253',
+  E254: 'E254',
+  E255: 'E255',
+
+  // ── Checker for-loop enhancements (E261–E264) ─────────────────
+  E261: 'E261',
+  E262: 'E262',
+  E263: 'E263',
+  E264: 'E264',
+
   // ── Checker warnings (W200–W203) ───────────────────────────────────
   W203: 'W203',
 

@@ -110,6 +110,38 @@ export class TsTypeExtractor implements TypeExtractor {
       exports.set(sym.getName(), sym);
     }
 
+    // Handle `export = X` pattern: synthesize a `default` entry and merge
+    // namespace members as named exports (matching TS esModuleInterop behavior)
+    if (!exports.has('default') && moduleSymbol.exports) {
+      const exportEqualsSymbol = moduleSymbol.exports.get(
+        'export=' as ts.__String,
+      );
+      if (exportEqualsSymbol) {
+        // Resolve the aliased symbol to get the actual exported value
+        let resolved: ts.Symbol;
+        try {
+          resolved = checker.getAliasedSymbol(exportEqualsSymbol);
+        } catch {
+          // getAliasedSymbol throws when the symbol is not actually an alias
+          // (e.g., namespace-only exports). Fall back to the raw symbol.
+          resolved = exportEqualsSymbol;
+        }
+        exports.set('default', resolved);
+
+        // If the resolved symbol has a ValueModule (namespace) with exports,
+        // merge its members as named exports
+        const nsExports = resolved.exports;
+        if (nsExports) {
+          nsExports.forEach((nsSym, nsName) => {
+            const name = nsName as string;
+            // Skip internal symbols and the export= itself
+            if (name.startsWith('__') || exports.has(name)) return;
+            exports.set(name, nsSym);
+          });
+        }
+      }
+    }
+
     return { exports, typeChecker: checker, program };
   }
 

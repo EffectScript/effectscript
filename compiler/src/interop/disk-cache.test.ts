@@ -20,6 +20,7 @@ function makeSig(
     types: new Map(Object.entries(types)),
     values: new Map(Object.entries(values)),
     adtConstructors: new Map(Object.entries(adtConstructors)),
+    extensions: new Map(),
   };
 }
 

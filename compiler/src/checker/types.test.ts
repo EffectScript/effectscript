@@ -15,6 +15,7 @@ import {
   type ErrorType,
   type AnyType,
   type NullType,
+  type LiteralType,
   type ADTVariant,
   type ParamType,
   isAssignableTo,
@@ -27,6 +28,7 @@ import {
   simplifyUnion,
   resolveType,
   freshTypeVar,
+  widenLiteral,
 } from './types.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -78,6 +80,10 @@ function generic(name: string): GenericType {
 
 function promise(inner: Type): PromiseType {
   return { kind: 'promise', inner };
+}
+
+function literal(base: 'string' | 'number' | 'boolean', value: string | number | boolean): LiteralType {
+  return { kind: 'literal', base, value };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -425,6 +431,13 @@ describe('types.ts', () => {
       expect(typeToString(fnType([param('a', num), param('b', str)], bool))).toBe('(number, string) => boolean');
     });
 
+    it('function with rest params', () => {
+      const fn: FunctionType = { kind: 'function', params: [param('msg', str)], returnType: voidT, rest: { name: 'args', elementType: str } };
+      expect(typeToString(fn)).toBe('(string, ...string[]) => void');
+      const restOnly: FunctionType = { kind: 'function', params: [], returnType: num, rest: { name: 'nums', elementType: num } };
+      expect(typeToString(restOnly)).toBe('(...number[]) => number');
+    });
+
     it('record', () => {
       const result = typeToString(record({ name: str, age: num }));
       expect(result).toBe('{ name: string, age: number }');
@@ -464,6 +477,65 @@ describe('types.ts', () => {
       const tv = freshTypeVar();
       tv.resolved = num;
       expect(typeToString(tv)).toBe('number');
+    });
+
+    it('self-referential record type does not stack overflow', () => {
+      // Simulate: interface Node { value: string; next: Node }
+      const fields = new Map<string, Type>();
+      const selfRef: RecordType = { kind: 'record', fields };
+      fields.set('value', str);
+      fields.set('next', selfRef);
+      // Should terminate and contain <recursive> for the cycle
+      const result = typeToString(selfRef);
+      expect(result).toContain('value: string');
+      expect(result).toContain('<recursive>');
+    });
+
+    it('mutually recursive types (A→B→A) terminate', () => {
+      // Simulate: interface A { b: B }, interface B { a: A }
+      const fieldsA = new Map<string, Type>();
+      const fieldsB = new Map<string, Type>();
+      const typeA: RecordType = { kind: 'record', fields: fieldsA };
+      const typeB: RecordType = { kind: 'record', fields: fieldsB };
+      fieldsA.set('b', typeB);
+      fieldsB.set('a', typeA);
+      const result = typeToString(typeA);
+      expect(result).toContain('<recursive>');
+    });
+
+    it('deeply nested type (20+ levels) terminates', () => {
+      // Build a chain of nested records: { inner: { inner: { ... } } }
+      let current: Type = str;
+      for (let i = 0; i < 50; i++) {
+        current = { kind: 'record', fields: new Map([['inner', current]]) };
+      }
+      // Should terminate without stack overflow — and no false-positive cycle detection
+      const result = typeToString(current);
+      expect(result).toBeDefined();
+      expect(typeof result).toBe('string');
+      expect(result).not.toContain('<recursive>');
+    });
+
+    it('self-referential function param does not stack overflow', () => {
+      // Simulate: (self: RecordWithSelf) => void where RecordWithSelf has method returning itself
+      const fields = new Map<string, Type>();
+      const selfRecord: RecordType = { kind: 'record', fields };
+      const selfFn: FunctionType = {
+        kind: 'function',
+        params: [{ name: 'self', type: selfRecord, optional: false, hasDefault: false }],
+        returnType: selfRecord,
+      };
+      fields.set('method', selfFn);
+      const result = typeToString(selfRecord);
+      expect(result).toContain('<recursive>');
+    });
+
+    it('set type', () => {
+      expect(typeToString({ kind: 'set', element: num })).toBe('Set<number>');
+    });
+
+    it('map type', () => {
+      expect(typeToString({ kind: 'map', key: str, value: num })).toBe('Map<string, number>');
     });
   });
 
@@ -580,6 +652,174 @@ describe('types.ts', () => {
     it('starts unresolved', () => {
       const tv = freshTypeVar();
       expect(tv.resolved).toBeUndefined();
+    });
+  });
+
+  // ── Literal Type ──────────────────────────────────────────────────
+
+  describe('LiteralType', () => {
+    describe('typesEqual', () => {
+      it('same string literal', () => {
+        expect(typesEqual(literal('string', 'GET'), literal('string', 'GET'))).toBe(true);
+      });
+
+      it('different string literals', () => {
+        expect(typesEqual(literal('string', 'GET'), literal('string', 'POST'))).toBe(false);
+      });
+
+      it('same number literal', () => {
+        expect(typesEqual(literal('number', 42), literal('number', 42))).toBe(true);
+      });
+
+      it('different number literals', () => {
+        expect(typesEqual(literal('number', 42), literal('number', 43))).toBe(false);
+      });
+
+      it('same boolean literal', () => {
+        expect(typesEqual(literal('boolean', true), literal('boolean', true))).toBe(true);
+      });
+
+      it('different boolean literals', () => {
+        expect(typesEqual(literal('boolean', true), literal('boolean', false))).toBe(false);
+      });
+
+      it('literal vs primitive is not equal', () => {
+        expect(typesEqual(literal('string', 'GET'), str)).toBe(false);
+        expect(typesEqual(literal('number', 42), num)).toBe(false);
+      });
+    });
+
+    describe('typeToString', () => {
+      it('string literal', () => {
+        expect(typeToString(literal('string', 'GET'))).toBe('"GET"');
+      });
+
+      it('number literal', () => {
+        expect(typeToString(literal('number', 42))).toBe('42');
+      });
+
+      it('boolean literal true', () => {
+        expect(typeToString(literal('boolean', true))).toBe('true');
+      });
+
+      it('boolean literal false', () => {
+        expect(typeToString(literal('boolean', false))).toBe('false');
+      });
+    });
+
+    describe('isAssignableTo', () => {
+      it('literal assignable to same literal', () => {
+        expect(isAssignableTo(literal('string', 'GET'), literal('string', 'GET'))).toBe(true);
+      });
+
+      it('literal NOT assignable to different literal', () => {
+        expect(isAssignableTo(literal('string', 'GET'), literal('string', 'POST'))).toBe(false);
+      });
+
+      it('string literal assignable to string', () => {
+        expect(isAssignableTo(literal('string', 'GET'), str)).toBe(true);
+      });
+
+      it('number literal assignable to number', () => {
+        expect(isAssignableTo(literal('number', 42), num)).toBe(true);
+      });
+
+      it('boolean literal assignable to boolean', () => {
+        expect(isAssignableTo(literal('boolean', true), bool)).toBe(true);
+      });
+
+      it('string NOT assignable to string literal', () => {
+        expect(isAssignableTo(str, literal('string', 'GET'))).toBe(false);
+      });
+
+      it('number NOT assignable to number literal', () => {
+        expect(isAssignableTo(num, literal('number', 42))).toBe(false);
+      });
+
+      it('literal union assignable to base primitive', () => {
+        expect(isAssignableTo(
+          union(literal('string', 'GET'), literal('string', 'POST')),
+          str,
+        )).toBe(true);
+      });
+
+      it('base primitive NOT assignable to literal union', () => {
+        expect(isAssignableTo(
+          str,
+          union(literal('string', 'GET'), literal('string', 'POST')),
+        )).toBe(false);
+      });
+
+      it('literal assignable to union containing it', () => {
+        expect(isAssignableTo(
+          literal('string', 'GET'),
+          union(literal('string', 'GET'), literal('string', 'POST')),
+        )).toBe(true);
+      });
+
+      it('literal NOT assignable to union not containing it', () => {
+        expect(isAssignableTo(
+          literal('string', 'PATCH'),
+          union(literal('string', 'GET'), literal('string', 'POST')),
+        )).toBe(false);
+      });
+    });
+
+    describe('widenLiteral', () => {
+      it('widens string literal to string', () => {
+        expect(widenLiteral(literal('string', 'hello'))).toEqual(str);
+      });
+
+      it('widens number literal to number', () => {
+        expect(widenLiteral(literal('number', 42))).toEqual(num);
+      });
+
+      it('widens boolean literal to boolean', () => {
+        expect(widenLiteral(literal('boolean', true))).toEqual(bool);
+      });
+
+      it('returns non-literal type unchanged', () => {
+        expect(widenLiteral(str)).toEqual(str);
+        expect(widenLiteral(num)).toEqual(num);
+      });
+    });
+
+    describe('simplifyUnion with literals', () => {
+      it('string | "hello" simplifies to string', () => {
+        const result = simplifyUnion([str, literal('string', 'hello')]);
+        expect(result).toEqual(str);
+      });
+
+      it('"GET" | "POST" stays as union', () => {
+        const result = simplifyUnion([literal('string', 'GET'), literal('string', 'POST')]);
+        expect(result.kind).toBe('union');
+        if (result.kind === 'union') {
+          expect(result.members).toHaveLength(2);
+        }
+      });
+
+      it('true | false simplifies to boolean', () => {
+        const result = simplifyUnion([literal('boolean', true), literal('boolean', false)]);
+        expect(result).toEqual(bool);
+      });
+
+      it('number | 42 simplifies to number', () => {
+        const result = simplifyUnion([num, literal('number', 42)]);
+        expect(result).toEqual(num);
+      });
+
+      it('boolean | true simplifies to boolean', () => {
+        const result = simplifyUnion([bool, literal('boolean', true)]);
+        expect(result).toEqual(bool);
+      });
+
+      it('deduplicates literal types', () => {
+        const result = simplifyUnion([literal('string', 'GET'), literal('string', 'GET'), literal('string', 'POST')]);
+        expect(result.kind).toBe('union');
+        if (result.kind === 'union') {
+          expect(result.members).toHaveLength(2);
+        }
+      });
     });
   });
 });

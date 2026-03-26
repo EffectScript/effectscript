@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { checkExhaustiveness } from './exhaustiveness.js';
-import type { Type, PrimitiveType, NullableType, ADTType, ADTVariant } from './types.js';
+import type { Type, PrimitiveType, NullableType, ADTType, ADTVariant, LiteralType, UnionType } from './types.js';
 import type { Pattern, Expression } from '../parser/ast.js';
 import type { Span } from '../utils/span.js';
 
@@ -297,6 +297,121 @@ describe('exhaustiveness.ts', () => {
         arm(variantPattern('None')),
       ], dummySpan());
       expect(result.exhaustive).toBe(true);
+    });
+  });
+
+  describe('literal union exhaustiveness', () => {
+    function literalUnion(literals: Array<{ base: 'string' | 'number' | 'boolean'; value: string | number | boolean }>): UnionType {
+      return {
+        kind: 'union',
+        members: literals.map(l => ({ kind: 'literal', base: l.base, value: l.value }) as LiteralType),
+      };
+    }
+
+    it('all string literal members covered → exhaustive', () => {
+      const httpMethod = literalUnion([
+        { base: 'string', value: 'GET' },
+        { base: 'string', value: 'POST' },
+      ]);
+      const result = checkExhaustiveness(httpMethod, [
+        arm(stringLiteralPattern('GET')),
+        arm(stringLiteralPattern('POST')),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(true);
+      expect(result.missingPatterns).toEqual([]);
+    });
+
+    it('missing string literal member → not exhaustive', () => {
+      const httpMethod = literalUnion([
+        { base: 'string', value: 'GET' },
+        { base: 'string', value: 'POST' },
+        { base: 'string', value: 'PUT' },
+      ]);
+      const result = checkExhaustiveness(httpMethod, [
+        arm(stringLiteralPattern('GET')),
+        arm(stringLiteralPattern('POST')),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(false);
+      expect(result.missingPatterns).toContain('"PUT"');
+    });
+
+    it('all number literal members covered → exhaustive', () => {
+      const diceRoll = literalUnion([
+        { base: 'number', value: 1 },
+        { base: 'number', value: 2 },
+        { base: 'number', value: 3 },
+      ]);
+      const result = checkExhaustiveness(diceRoll, [
+        arm(numberLiteralPattern(1)),
+        arm(numberLiteralPattern(2)),
+        arm(numberLiteralPattern(3)),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(true);
+    });
+
+    it('missing number literal member → not exhaustive', () => {
+      const diceRoll = literalUnion([
+        { base: 'number', value: 1 },
+        { base: 'number', value: 2 },
+        { base: 'number', value: 3 },
+      ]);
+      const result = checkExhaustiveness(diceRoll, [
+        arm(numberLiteralPattern(1)),
+        arm(numberLiteralPattern(3)),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(false);
+      expect(result.missingPatterns).toContain('2');
+    });
+
+    it('wildcard covers literal union', () => {
+      const httpMethod = literalUnion([
+        { base: 'string', value: 'GET' },
+        { base: 'string', value: 'POST' },
+      ]);
+      const result = checkExhaustiveness(httpMethod, [
+        arm(wildcardPattern()),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(true);
+    });
+
+    it('binding pattern covers literal union', () => {
+      const httpMethod = literalUnion([
+        { base: 'string', value: 'GET' },
+        { base: 'string', value: 'POST' },
+      ]);
+      const result = checkExhaustiveness(httpMethod, [
+        arm(bindingPattern('m')),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(true);
+    });
+
+    it('boolean literal union is exhaustive with true and false', () => {
+      const boolLiterals = literalUnion([
+        { base: 'boolean', value: true },
+        { base: 'boolean', value: false },
+      ]);
+      const result = checkExhaustiveness(boolLiterals, [
+        arm(literalPattern(true)),
+        arm(literalPattern(false)),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(true);
+    });
+
+    it('mixed union (not all literals) requires wildcard', () => {
+      // A union of a literal and a non-literal type
+      const mixedUnion: UnionType = {
+        kind: 'union',
+        members: [
+          { kind: 'literal', base: 'string', value: 'GET' } as LiteralType,
+          { kind: 'primitive', name: 'number' } as PrimitiveType,
+        ],
+      };
+      const result = checkExhaustiveness(mixedUnion, [
+        arm(stringLiteralPattern('GET')),
+        arm(numberLiteralPattern(42)),
+      ], dummySpan());
+      expect(result.exhaustive).toBe(false);
+      expect(result.missingPatterns).toContain('_');
     });
   });
 });

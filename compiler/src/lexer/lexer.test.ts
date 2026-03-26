@@ -43,6 +43,7 @@ describe('Keywords and Identifiers', () => {
     'import', 'export', 'from', 'for', 'while',
     'try', 'catch', 'throw', 'break', 'continue', 'return',
     'in', 'true', 'false', 'null', 'new',
+    'fun', 'this', 'async', 'await',
   ];
 
   it.each(allKeywords)('should tokenize keyword %s', (kw) => {
@@ -79,6 +80,18 @@ describe('Keywords and Identifiers', () => {
     const tok = first('_');
     expect(tok.kind).toBe('Identifier');
     expect(tok.text).toBe('_');
+  });
+
+  it('should tokenize `asyncable` as identifier (not keyword)', () => {
+    const tok = first('asyncable');
+    expect(tok.kind).toBe('Identifier');
+    expect(tok.text).toBe('asyncable');
+  });
+
+  it('should tokenize `awaitable` as identifier (not keyword)', () => {
+    const tok = first('awaitable');
+    expect(tok.kind).toBe('Identifier');
+    expect(tok.text).toBe('awaitable');
   });
 });
 
@@ -133,8 +146,34 @@ describe('Number Literals', () => {
     expect(kinds('.5')).toEqual(['Dot', 'NumberLiteral']);
   });
 
-  it('should lex .. as two Dots', () => {
-    expect(kinds('..')).toEqual(['Dot', 'Dot']);
+  it('should lex .. as DotDot', () => {
+    expect(kinds('..')).toEqual(['DotDot']);
+  });
+});
+
+// ── Happy Path: Range Tokens ────────────────────────────────────────
+
+describe('Range Tokens', () => {
+  it('should tokenize .. as DotDot', () => {
+    const tok = first('..');
+    expect(tok.kind).toBe('DotDot');
+    expect(tok.text).toBe('..');
+  });
+
+  it('should tokenize ..< as DotDotLess', () => {
+    const tok = first('..<');
+    expect(tok.kind).toBe('DotDotLess');
+    expect(tok.text).toBe('..<');
+  });
+
+  it('should still tokenize single . as Dot', () => {
+    const tok = first('. ');
+    expect(tok.kind).toBe('Dot');
+    expect(tok.text).toBe('.');
+  });
+
+  it('should tokenize ... as DotDot + Dot', () => {
+    expect(kinds('...')).toEqual(['DotDot', 'Dot']);
   });
 });
 
@@ -251,7 +290,6 @@ describe('Operators', () => {
       ['?.', 'QuestionDot'],
       ['??', 'QuestionQuestion'],
       ['=>', 'FatArrow'],
-      ['|>', 'PipeGreater'],
     ];
     for (const [src, expected] of ops) {
       const tok = first(src);
@@ -265,8 +303,8 @@ describe('Operators', () => {
     expect(kinds('!==')).toEqual(['BangEqual', 'Equal']);
     // ||> should be PipePipe + Greater
     expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
-    // |> should be PipeGreater
-    expect(kinds('|>')).toEqual(['PipeGreater']);
+    // |> should be Pipe + Greater (pipe operator removed in v0.2)
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
     // => should be FatArrow
     expect(kinds('=>')).toEqual(['FatArrow']);
   });
@@ -485,8 +523,8 @@ describe('Edge Cases', () => {
     expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
   });
 
-  it('should disambiguate adjacent operators: |>', () => {
-    expect(kinds('|>')).toEqual(['PipeGreater']);
+  it('should disambiguate adjacent operators: |> (now Pipe + Greater)', () => {
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
   });
 
   it('should lex number followed by identifier: 123abc', () => {
@@ -496,7 +534,7 @@ describe('Edge Cases', () => {
   it('should handle dot disambiguation: 0.5 vs obj.field vs ..', () => {
     expect(kinds('0.5')).toEqual(['NumberLiteral']);
     expect(kinds('obj.field')).toEqual(['Identifier', 'Dot', 'Identifier']);
-    expect(kinds('..')).toEqual(['Dot', 'Dot']);
+    expect(kinds('..')).toEqual(['DotDot']);
   });
 
   it('should handle } closing interpolation vs closing block', () => {
@@ -575,12 +613,10 @@ describe('Error Handling', () => {
     expect(diagnostics[0].code).toBe('E005');
   });
 
-  it('should report E006 for single &', () => {
+  it('should lex single & as Amp token', () => {
     const { tokens, diagnostics } = lex('&');
-    expect(tokens.some((t) => t.kind === 'Error')).toBe(true);
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0].code).toBe('E006');
-    expect(diagnostics[0].message).toContain('&&');
+    expect(tokens.some((t) => t.kind === 'Amp')).toBe(true);
+    expect(diagnostics).toHaveLength(0);
   });
 
   it('should lex single ? as Question token', () => {
@@ -735,6 +771,18 @@ describe('Comment Edge Cases', () => {
   });
 });
 
+// ── Pipe Operator Removal Tests ──────────────────────────────────────
+
+describe('Pipe operator removal (v0.2)', () => {
+  it('should tokenize |> as Pipe + Greater (two separate tokens)', () => {
+    expect(kinds('|>')).toEqual(['Pipe', 'Greater']);
+  });
+
+  it('should still tokenize ||> as PipePipe + Greater', () => {
+    expect(kinds('||>')).toEqual(['PipePipe', 'Greater']);
+  });
+});
+
 // ── Question Token Tests ─────────────────────────────────────────────
 
 describe('Question Token', () => {
@@ -749,5 +797,26 @@ describe('Question Token', () => {
   it('should lex bare ? as Question', () => {
     expect(first('?').kind).toBe('Question');
     expect(first('?').text).toBe('?');
+  });
+});
+
+// ── Ampersand Token ──────────────────────────────────────────────────
+
+describe('Ampersand token', () => {
+  it('should lex & as Amp', () => {
+    const tok = first('&');
+    expect(tok.kind).toBe('Amp');
+    expect(tok.text).toBe('&');
+  });
+
+  it('should lex && as AmpAmp (regression)', () => {
+    const tok = first('&&');
+    expect(tok.kind).toBe('AmpAmp');
+    expect(tok.text).toBe('&&');
+  });
+
+  it('should lex & & as two Amp tokens', () => {
+    const k = kinds('& &');
+    expect(k).toEqual(['Amp', 'Amp']);
   });
 });
