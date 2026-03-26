@@ -15,7 +15,7 @@
  */
 
 import type { Span } from '../utils/span.js';
-import type { Type } from './types.js';
+import type { Type, LiteralType } from './types.js';
 import { resolveType } from './types.js';
 import type { Pattern, Expression } from '../parser/ast.js';
 
@@ -89,8 +89,17 @@ export function checkExhaustiveness(
         missingPatterns: [`<other ${resolved.name} values>`],
       };
 
+    case 'union': {
+      const allLiterals = resolved.members.every(m => resolveType(m).kind === 'literal');
+      if (allLiterals) {
+        return checkLiteralUnionExhaustiveness(resolved.members, unguardedArms);
+      }
+      // Mixed unions (not all literals) — require wildcard
+      return { exhaustive: false, missingPatterns: ['_'] };
+    }
+
     default:
-      // For other types (records, unions, etc.) — require wildcard
+      // For other types (records, etc.) — require wildcard
       return { exhaustive: false, missingPatterns: ['_'] };
   }
 }
@@ -234,6 +243,43 @@ function checkBooleanExhaustiveness(
 }
 
 /**
+ * Check exhaustiveness for a union of literal types by tracking which values are covered.
+ *
+ * Each literal member is tracked by a composite key (`base:value`). Match arms with
+ * literal patterns remove the corresponding key. If all keys are removed, the match
+ * is exhaustive.
+ */
+function checkLiteralUnionExhaustiveness(
+  members: readonly Type[],
+  arms: readonly MatchArm[],
+): ExhaustivenessResult {
+  const uncovered = new Map<string, string>();
+  for (const member of members) {
+    const lit = resolveType(member) as LiteralType;
+    const key = `${lit.base}:${String(lit.value)}`;
+    const display = lit.base === 'string' ? `"${lit.value}"` : String(lit.value);
+    uncovered.set(key, display);
+  }
+
+  for (const matchArm of arms) {
+    const pat = matchArm.pattern;
+    if (pat.kind === 'LiteralPattern') {
+      const lit = pat.literal;
+      let key: string;
+      if (lit.kind === 'StringLiteral') key = `string:${lit.value}`;
+      else if (lit.kind === 'NumberLiteral') key = `number:${lit.value}`;
+      else key = `boolean:${lit.value}`;
+      uncovered.delete(key);
+    }
+  }
+
+  if (uncovered.size === 0) {
+    return { exhaustive: true, missingPatterns: [] };
+  }
+  return { exhaustive: false, missingPatterns: Array.from(uncovered.values()) };
+}
+
+/**
  * Produce a short human-readable description of a type for diagnostic messages.
  *
  * @param type - The type to describe.
@@ -244,6 +290,8 @@ function typeDescription(type: Type): string {
   switch (resolved.kind) {
     case 'primitive': return resolved.name;
     case 'adt': return resolved.name;
+    case 'literal': return resolved.base === 'string' ? `"${resolved.value}"` : String(resolved.value);
+    case 'union': return resolved.members.map(m => typeDescription(m)).join(' | ');
     default: return '<non-null>';
   }
 }

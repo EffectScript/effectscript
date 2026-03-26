@@ -16,6 +16,8 @@ beforeAll(() => {
   fs.writeFileSync(path.join(tmpDir, 'utils.d.ts'), 'export declare const x: number;');
   fs.writeFileSync(path.join(tmpDir, 'helper.ts'), 'export const y = 1;');
   fs.writeFileSync(path.join(tmpDir, 'script.js'), 'export const z = 1;');
+  fs.writeFileSync(path.join(tmpDir, 'cjs-module.d.cts'), 'declare const x: number; export = x;');
+  fs.writeFileSync(path.join(tmpDir, 'esm-module.d.mts'), 'export declare const x: number;');
   fs.mkdirSync(path.join(tmpDir, 'subdir'), { recursive: true });
   fs.writeFileSync(path.join(tmpDir, 'subdir', 'index.d.ts'), 'export declare const w: string;');
 });
@@ -115,5 +117,23 @@ describe('NodeModuleResolver', () => {
     expect(result).not.toBeNull();
     expect(result!.kind).toBe('dts');
     expect(result!.path).toBe(path.join(tmpDir, 'utils.d.ts'));
+  });
+
+  // ── .d.cts / .d.mts classification ─────────────────────────
+
+  it('resolves relative .d.cts import as dts kind', () => {
+    const resolver = new NodeModuleResolver({ basePath });
+    const result = resolver.resolve('./cjs-module', path.join(tmpDir, 'source.efs'));
+    expect(result).not.toBeNull();
+    expect(result!.kind).toBe('dts');
+    expect(result!.path).toBe(path.join(tmpDir, 'cjs-module.d.cts'));
+  });
+
+  it('resolves relative .d.mts import as dts kind', () => {
+    const resolver = new NodeModuleResolver({ basePath });
+    const result = resolver.resolve('./esm-module', path.join(tmpDir, 'source.efs'));
+    expect(result).not.toBeNull();
+    expect(result!.kind).toBe('dts');
+    expect(result!.path).toBe(path.join(tmpDir, 'esm-module.d.mts'));
   });
 });

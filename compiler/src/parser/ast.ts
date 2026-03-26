@@ -64,7 +64,8 @@ export type Declaration =
   | LetDeclaration
   | TypeDeclaration
   | ImportDeclaration
-  | ExportDeclaration;
+  | ExportDeclaration
+  | ExtensionFunctionDeclaration;
 
 /** All expression node types (produce a value). */
 export type Expression =
@@ -85,7 +86,10 @@ export type Expression =
   | TryCatchExpr
   | ArrayExpr
   | RecordExpr
-  | TemplateString;
+  | TemplateString
+  | ThisExpr
+  | AwaitExpr
+  | NamedArgument;
 
 /** Imperative statement node types (executed for side effects). */
 export type Statement =
@@ -105,7 +109,8 @@ export type Pattern =
   | RecordPattern
   | WildcardPattern
   | BindingPattern
-  | NullPattern;
+  | NullPattern
+  | TuplePattern;
 
 /** Inline type annotation node types. */
 export type TypeNode =
@@ -114,7 +119,9 @@ export type TypeNode =
   | RecordType
   | NullableType
   | UnionType
-  | TupleType;
+  | TupleType
+  | LiteralTypeNode
+  | IntersectionType;
 
 // ── Program (Root) ───────────────────────────────────────────────────
 
@@ -159,10 +166,12 @@ export interface TypeDeclaration extends ASTNodeBase {
   readonly name: Identifier;
   /** Generic type parameters, e.g. `<T, E>`. */
   readonly typeParams?: readonly TypeParameter[];
-  /** ADT variant arms separated by `|`. Empty for named record types. */
+  /** ADT variant arms separated by `|`. Empty for named record types and type aliases. */
   readonly variants: readonly VariantDeclaration[];
   /** Present when the type is a named record alias (`type Foo = { ... }`). */
   readonly recordType?: RecordType;
+  /** Present when the type is a non-record type alias (e.g. `type Method = "GET" | "POST"`). */
+  readonly typeAlias?: TypeNode;
   /** `true` if this declaration appears inside an `export` wrapper. */
   readonly exported: boolean;
 }
@@ -188,11 +197,13 @@ export interface VariantField {
   readonly type: TypeNode;
 }
 
-/** A generic type parameter, e.g. `T` in `type Result<T, E>`. */
+/** A generic type parameter, e.g. `T` in `type Result<T, E>` or `T: Constraint` with an upper bound. */
 export interface TypeParameter extends ASTNodeBase {
   readonly kind: 'TypeParameter';
   /** The parameter name. */
   readonly name: Identifier;
+  /** Optional constraint (upper bound), e.g. `{ name: string }` in `<T: { name: string }>`. */
+  readonly constraint?: TypeNode;
 }
 
 /**
@@ -229,11 +240,39 @@ export interface ImportSpecifier extends ASTNodeBase {
 export interface ExportDeclaration extends ASTNodeBase {
   readonly kind: 'ExportDeclaration';
   /** The inlined declaration being exported. */
-  readonly declaration?: LetDeclaration | TypeDeclaration;
+  readonly declaration?: LetDeclaration | TypeDeclaration | ExtensionFunctionDeclaration;
   /** Named export specifiers. */
   readonly specifiers?: readonly ExportSpecifier[];
   /** Re-export source module path. */
   readonly source?: StringLiteral;
+}
+
+/**
+ * Extension function declaration: `fun ReceiverType.method(params): ReturnType => body`.
+ *
+ * Adds a method to an existing type without modifying it. `this` refers to
+ * the receiver instance inside the body.
+ */
+export interface ExtensionFunctionDeclaration extends ASTNodeBase {
+  readonly kind: 'ExtensionFunctionDeclaration';
+  /** The type being extended (e.g., `string`, `Array<T>`, `User`). */
+  readonly receiverType: TypeNode;
+  /** The method name. */
+  readonly name: Identifier;
+  /** Generic type parameters on the extension (e.g., `<T>` in `fun <T> Array<T>.first()`). */
+  readonly typeParams?: readonly TypeParameter[];
+  /** Method parameters (excluding the implicit receiver). */
+  readonly params: readonly FunctionParam[];
+  /** Return type annotation (required for extension functions). */
+  readonly returnType: TypeNode;
+  /** The method body expression. */
+  readonly body: Expression;
+  /** Whether this extension is exported. */
+  readonly exported: boolean;
+  /** Whether this extension function is async (returns Promise<T>). */
+  readonly async?: boolean;
+  /** Resolved receiver type, set by the checker. */
+  resolvedReceiverType?: import('../checker/types.js').Type;
 }
 
 /** A single named export: `local` is the internal name, `exported` is the alias. */
@@ -295,7 +334,7 @@ export type BinaryOperator =
   | '+' | '-' | '*' | '/' | '%'
   | '==' | '!=' | '<' | '>' | '<=' | '>='
   | '&&' | '||'
-  | '??' | '|>';
+  | '??';
 
 /** Unary prefix expression: `!x` or `-x`. */
 export interface UnaryExpr extends ASTNodeBase {
@@ -316,8 +355,14 @@ export interface CallExpr extends ASTNodeBase {
   readonly callee: Expression;
   /** Explicit type arguments for generic calls, e.g. `foo<string>(x)`. */
   readonly typeArgs?: readonly TypeNode[];
-  /** Positional argument expressions. */
+  /** Positional argument expressions (may include NamedArgument nodes). */
   readonly args: readonly Expression[];
+  /**
+   * Parameter-ordered argument expressions, set by the checker when named arguments are present.
+   * `undefined` entries represent skipped defaulted parameters.
+   * The emitter reads this to reorder arguments to positional JS output.
+   */
+  resolvedArgs?: readonly (Expression | undefined)[];
 }
 
 /** Constructor call: `new Foo(args)` or `new Foo<T>(args)`. */
@@ -327,8 +372,13 @@ export interface NewExpr extends ASTNodeBase {
   readonly callee: Expression;
   /** Explicit type arguments. */
   readonly typeArgs?: readonly TypeNode[];
-  /** Positional argument expressions. */
+  /** Positional argument expressions (may include NamedArgument nodes). */
   readonly args: readonly Expression[];
+  /**
+   * Parameter-ordered argument expressions, set by the checker when named arguments are present.
+   * `undefined` entries represent skipped defaulted parameters.
+   */
+  resolvedArgs?: readonly (Expression | undefined)[];
 }
 
 /** Member access: `obj.prop` or optional chaining `obj?.prop`. */
@@ -340,6 +390,8 @@ export interface MemberExpr extends ASTNodeBase {
   readonly property: Identifier;
   /** `true` if this uses `?.` (optional chaining). */
   readonly optional: boolean;
+  /** Set by the checker when this member access resolves to an extension function call. */
+  extensionEmitName?: string;
 }
 
 /**
@@ -393,6 +445,8 @@ export interface BlockExpr extends ASTNodeBase {
 /** Arrow function: `(params) => body` or `<T>(params): ReturnType => body`. */
 export interface ArrowFunction extends ASTNodeBase {
   readonly kind: 'ArrowFunction';
+  /** Whether the function is declared with the `async` keyword. */
+  readonly async?: boolean;
   /** Generic type parameters for the function. */
   readonly typeParams?: readonly TypeParameter[];
   /** Function parameters with optional types and defaults. */
@@ -412,6 +466,8 @@ export interface FunctionParam extends ASTNodeBase {
   readonly type?: TypeNode;
   /** Optional default value expression. */
   readonly defaultValue?: Expression;
+  /** Whether the parameter is declared with `mut` (allows content mutation). */
+  readonly mutable: boolean;
 }
 
 /** Try/catch expression: `try { ... } catch (e) { ... }`. */
@@ -488,6 +544,32 @@ export interface TemplateExprPart {
   readonly span: Span;
 }
 
+/** The `this` keyword expression — refers to the receiver inside an extension function. */
+export interface ThisExpr extends ASTNodeBase {
+  readonly kind: 'ThisExpr';
+}
+
+/** Await expression: `await expr`. Unwraps a `Promise<T>` to `T` inside an async function. */
+export interface AwaitExpr extends ASTNodeBase {
+  readonly kind: 'AwaitExpr';
+  readonly argument: Expression;
+}
+
+/**
+ * Named argument in a call expression: `name: value`.
+ *
+ * Only valid inside the argument list of a `CallExpr` or `NewExpr`.
+ * The checker resolves named arguments to parameter positions and
+ * annotates the call node with `resolvedArgs` for the emitter.
+ */
+export interface NamedArgument extends ASTNodeBase {
+  readonly kind: 'NamedArgument';
+  /** The parameter name being targeted. */
+  readonly name: Identifier;
+  /** The argument value expression. */
+  readonly value: Expression;
+}
+
 // ── Patterns ─────────────────────────────────────────────────────────
 
 /** Matches a specific literal value: number, string, or boolean. */
@@ -540,6 +622,13 @@ export interface BindingPattern extends ASTNodeBase {
 /** Matches the `null` literal specifically. */
 export interface NullPattern extends ASTNodeBase {
   readonly kind: 'NullPattern';
+}
+
+/** Tuple destructuring pattern: `(a, b)` or `(_, item)`. Used in for-loop variable position. */
+export interface TuplePattern extends ASTNodeBase {
+  readonly kind: 'TuplePattern';
+  /** At least 2 elements; each is an Identifier binding or a WildcardPattern discard. */
+  readonly elements: readonly (Identifier | WildcardPattern)[];
 }
 
 // ── Type Nodes ───────────────────────────────────────────────────────
@@ -604,15 +693,44 @@ export interface TupleType extends ASTNodeBase {
   readonly elements: readonly TypeNode[];
 }
 
+/** Literal type node: a string, number, or boolean literal used as a type (e.g. `"GET"`, `42`, `true`). */
+export interface LiteralTypeNode extends ASTNodeBase {
+  readonly kind: 'LiteralTypeNode';
+  /** The literal expression this type represents. */
+  readonly literal: StringLiteral | NumberLiteral | BooleanLiteral;
+}
+
+/** Intersection type: `A & B`. All member types must be satisfied. */
+export interface IntersectionType extends ASTNodeBase {
+  readonly kind: 'IntersectionType';
+  readonly members: readonly TypeNode[];
+}
+
 // ── Statements ───────────────────────────────────────────────────────
 
-/** For-in loop: `for (x in iterable) { ... }`. */
+/** Range bound for `for (i in start..end)` / `for (i in start..<end)` loops. */
+export interface ForRange {
+  readonly start: Expression;
+  readonly end: Expression;
+  /** `true` for `..<` (exclusive), `false` for `..` (inclusive). */
+  readonly exclusive: boolean;
+  readonly span: Span;
+}
+
+/**
+ * For-in loop with optional range syntax and pattern destructuring.
+ *
+ * `for (x in iterable)`, `for (i in 0..<10)`, `for ({ name } in users)`,
+ * `for ((a, b) in pairs)`.
+ */
 export interface ForStatement extends ASTNodeBase {
   readonly kind: 'ForStatement';
-  /** Loop variable bound on each iteration. */
-  readonly variable: Identifier;
-  /** The expression being iterated over. */
+  /** Loop variable: simple identifier, record destructuring, or tuple destructuring. */
+  readonly variable: Identifier | RecordPattern | TuplePattern;
+  /** The expression being iterated over (also holds the start expr for ranges). */
   readonly iterable: Expression;
+  /** Present for range iteration (`..` or `..<`); mutually exclusive with iterable for semantics. */
+  readonly range?: ForRange;
   /** The loop body block. */
   readonly body: BlockExpr;
 }
@@ -690,7 +808,8 @@ export interface ErrorNode extends ASTNodeBase {
  */
 export function isDeclaration(node: { kind: string }): node is Declaration {
   return node.kind === 'LetDeclaration' || node.kind === 'TypeDeclaration' ||
-    node.kind === 'ImportDeclaration' || node.kind === 'ExportDeclaration';
+    node.kind === 'ImportDeclaration' || node.kind === 'ExportDeclaration' ||
+    node.kind === 'ExtensionFunctionDeclaration';
 }
 
 /**

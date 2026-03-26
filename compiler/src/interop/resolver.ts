@@ -100,6 +100,18 @@ export class NodeModuleResolver implements ModuleResolver {
       return { path: dtsPath, kind: 'dts' };
     }
 
+    // Check .d.cts (CommonJS declaration files)
+    const dctsPath = resolved + '.d.cts';
+    if (fs.existsSync(dctsPath)) {
+      return { path: dctsPath, kind: 'dts' };
+    }
+
+    // Check .d.mts (ESM declaration files)
+    const dmtsPath = resolved + '.d.mts';
+    if (fs.existsSync(dmtsPath)) {
+      return { path: dmtsPath, kind: 'dts' };
+    }
+
     // Check .ts
     const tsPath = resolved + '.ts';
     if (fs.existsSync(tsPath)) {
@@ -151,9 +163,11 @@ export class NodeModuleResolver implements ModuleResolver {
 
     if (result.resolvedModule) {
       const resolvedPath = result.resolvedModule.resolvedFileName;
-      const kind: ResolvedModule['kind'] = resolvedPath.endsWith(DTS_EXT) || resolvedPath.endsWith('.ts')
-        ? 'dts'
-        : 'js';
+      const kind: ResolvedModule['kind'] =
+        resolvedPath.endsWith(DTS_EXT) || resolvedPath.endsWith('.d.cts')
+          || resolvedPath.endsWith('.d.mts') || resolvedPath.endsWith('.ts')
+          ? 'dts'
+          : 'js';
       const packageName = this.extractPackageName(specifier);
       const resolvedModule: Record<string, unknown> = { path: resolvedPath, kind };
       if (packageName !== undefined) resolvedModule['packageName'] = packageName;

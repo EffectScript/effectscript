@@ -237,6 +237,7 @@ describe('walkAST', () => {
           kind: 'FunctionParam',
           name: makeId('x'),
           type: { kind: 'NamedType', name: makeId('T'), span },
+          mutable: false,
           span,
         }],
         returnType: { kind: 'NamedType', name: makeId('T'), span },
@@ -1198,6 +1199,7 @@ describe('walkAST', () => {
           name: makeId('x'),
           type: { kind: 'NamedType', name: makeId('number'), span },
           defaultValue: { kind: 'NumberLiteral', value: 0, span },
+          mutable: false,
           span,
         }],
         body: makeId('x'),
@@ -1462,5 +1464,93 @@ describe('walkAST - ImportSpecifier and ExportSpecifier visitor methods', () => 
     walkAST(prog, visitor);
 
     expect(calls).toEqual(['enter', 'leave']);
+  });
+
+  // ── For-loop enhancement visitor tests ──
+
+  it('should traverse TuplePattern children', () => {
+    const visited: string[] = [];
+    const tuplePattern: import('../parser/ast.js').TuplePattern = {
+      kind: 'TuplePattern',
+      elements: [makeId('a'), makeId('b')],
+      span,
+    };
+    const forStmt: ForStatement = {
+      kind: 'ForStatement',
+      variable: tuplePattern,
+      iterable: makeId('items'),
+      body: { kind: 'BlockExpr', body: [], span },
+      span,
+    };
+    const prog = makeProgram([forStmt]);
+
+    const visitor: ASTVisitor = {
+      enterTuplePattern() { visited.push('enter:TuplePattern'); },
+      leaveTuplePattern() { visited.push('leave:TuplePattern'); },
+      enterIdentifier(node) { visited.push(`enter:Identifier:${node.name}`); },
+    };
+
+    walkAST(prog, visitor);
+
+    expect(visited).toContain('enter:TuplePattern');
+    expect(visited).toContain('leave:TuplePattern');
+    expect(visited).toContain('enter:Identifier:a');
+    expect(visited).toContain('enter:Identifier:b');
+  });
+
+  it('should traverse ForRange start and end expressions', () => {
+    const visited: string[] = [];
+    const forStmt: ForStatement = {
+      kind: 'ForStatement',
+      variable: makeId('i'),
+      iterable: { kind: 'NumberLiteral', value: 0, span },
+      range: {
+        start: { kind: 'NumberLiteral', value: 0, span },
+        end: { kind: 'NumberLiteral', value: 10, span },
+        exclusive: true,
+        span,
+      },
+      body: { kind: 'BlockExpr', body: [], span },
+      span,
+    };
+    const prog = makeProgram([forStmt]);
+
+    const visitor: ASTVisitor = {
+      enterNumberLiteral(node) { visited.push(`num:${node.value}`); },
+    };
+
+    walkAST(prog, visitor);
+
+    // Should visit range start (0) and end (10), NOT iterable
+    expect(visited).toContain('num:0');
+    expect(visited).toContain('num:10');
+    expect(visited).toHaveLength(2);
+  });
+
+  it('should visit ForStatement with RecordPattern variable', () => {
+    const visited: string[] = [];
+    const recPat: RecordPattern = {
+      kind: 'RecordPattern',
+      fields: [{ name: makeId('name') }],
+      span,
+    };
+    const forStmt: ForStatement = {
+      kind: 'ForStatement',
+      variable: recPat,
+      iterable: makeId('users'),
+      body: { kind: 'BlockExpr', body: [], span },
+      span,
+    };
+    const prog = makeProgram([forStmt]);
+
+    const visitor: ASTVisitor = {
+      enterRecordPattern() { visited.push('enter:RecordPattern'); },
+      leaveRecordPattern() { visited.push('leave:RecordPattern'); },
+    };
+
+    walkAST(prog, visitor);
+
+    expect(visited).toContain('enter:RecordPattern');
+    expect(visited).toContain('leave:RecordPattern');
   });
 });

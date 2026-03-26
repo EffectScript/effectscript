@@ -28,14 +28,18 @@
 import type {
   ASTNodeBase, Program,
   Declaration, LetDeclaration, TypeDeclaration, ImportDeclaration, ExportDeclaration,
+  ExtensionFunctionDeclaration,
   Expression, NumberLiteral, StringLiteral, BooleanLiteral, NullLiteral, Identifier,
   BinaryExpr, UnaryExpr, CallExpr, NewExpr, MemberExpr, IfExpr, MatchExpr,
-  BlockExpr, ArrowFunction, TryCatchExpr, ArrayExpr, RecordExpr, TemplateString,
+  BlockExpr, ArrowFunction, TryCatchExpr, ArrayExpr, RecordExpr, TemplateString, AwaitExpr,
+  ThisExpr, NamedArgument,
   Statement, ForStatement, WhileStatement, AssignmentStatement, ThrowStatement,
   BreakStatement, ContinueStatement, ReturnStatement, ExpressionStatement,
   Pattern, LiteralPattern, VariantPattern, RecordPattern, WildcardPattern,
-  BindingPattern, NullPattern,
+  BindingPattern, NullPattern, TuplePattern,
   TypeNode, NamedType, FunctionType, RecordType, NullableType, UnionType, TupleType,
+  LiteralTypeNode,
+  IntersectionType,
   ErrorNode, MatchArm, VariantDeclaration, TypeParameter, FunctionParam,
   ImportSpecifier, ExportSpecifier, RecordField,
 } from '../parser/ast.js';
@@ -88,6 +92,8 @@ export interface ASTVisitor {
   leaveImportDeclaration?(node: ImportDeclaration, context: VisitorContext): void;
   enterExportDeclaration?(node: ExportDeclaration, context: VisitorContext): void;
   leaveExportDeclaration?(node: ExportDeclaration, context: VisitorContext): void;
+  enterExtensionFunctionDeclaration?(node: ExtensionFunctionDeclaration, context: VisitorContext): void;
+  leaveExtensionFunctionDeclaration?(node: ExtensionFunctionDeclaration, context: VisitorContext): void;
 
   // ── Per-kind: Expressions ──────────────────────────────────
   enterNumberLiteral?(node: NumberLiteral, context: VisitorContext): void;
@@ -126,6 +132,12 @@ export interface ASTVisitor {
   leaveRecordExpr?(node: RecordExpr, context: VisitorContext): void;
   enterTemplateString?(node: TemplateString, context: VisitorContext): void;
   leaveTemplateString?(node: TemplateString, context: VisitorContext): void;
+  enterAwaitExpr?(node: AwaitExpr, context: VisitorContext): void;
+  leaveAwaitExpr?(node: AwaitExpr, context: VisitorContext): void;
+  enterThisExpr?(node: ThisExpr, context: VisitorContext): void;
+  leaveThisExpr?(node: ThisExpr, context: VisitorContext): void;
+  enterNamedArgument?(node: NamedArgument, context: VisitorContext): void;
+  leaveNamedArgument?(node: NamedArgument, context: VisitorContext): void;
 
   // ── Per-kind: Statements ───────────────────────────────────
   enterForStatement?(node: ForStatement, context: VisitorContext): void;
@@ -158,6 +170,8 @@ export interface ASTVisitor {
   leaveBindingPattern?(node: BindingPattern, context: VisitorContext): void;
   enterNullPattern?(node: NullPattern, context: VisitorContext): void;
   leaveNullPattern?(node: NullPattern, context: VisitorContext): void;
+  enterTuplePattern?(node: TuplePattern, context: VisitorContext): void;
+  leaveTuplePattern?(node: TuplePattern, context: VisitorContext): void;
 
   // ── Per-kind: Type Nodes ───────────────────────────────────
   enterNamedType?(node: NamedType, context: VisitorContext): void;
@@ -172,6 +186,10 @@ export interface ASTVisitor {
   leaveUnionType?(node: UnionType, context: VisitorContext): void;
   enterTupleType?(node: TupleType, context: VisitorContext): void;
   leaveTupleType?(node: TupleType, context: VisitorContext): void;
+  enterLiteralTypeNode?(node: LiteralTypeNode, context: VisitorContext): void;
+  leaveLiteralTypeNode?(node: LiteralTypeNode, context: VisitorContext): void;
+  enterIntersectionType?(node: IntersectionType, context: VisitorContext): void;
+  leaveIntersectionType?(node: IntersectionType, context: VisitorContext): void;
 
   // ── Per-kind: Other ────────────────────────────────────────
   enterErrorNode?(node: ErrorNode, context: VisitorContext): void;
@@ -211,6 +229,7 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   TypeDeclaration: 'Declaration',
   ImportDeclaration: 'Declaration',
   ExportDeclaration: 'Declaration',
+  ExtensionFunctionDeclaration: 'Declaration',
   // Expressions
   NumberLiteral: 'Expression',
   StringLiteral: 'Expression',
@@ -230,6 +249,9 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   ArrayExpr: 'Expression',
   RecordExpr: 'Expression',
   TemplateString: 'Expression',
+  AwaitExpr: 'Expression',
+  ThisExpr: 'Expression',
+  NamedArgument: 'Expression',
   // Statements
   ForStatement: 'Statement',
   WhileStatement: 'Statement',
@@ -246,6 +268,7 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   WildcardPattern: 'Pattern',
   BindingPattern: 'Pattern',
   NullPattern: 'Pattern',
+  TuplePattern: 'Pattern',
   // Type Nodes
   NamedType: 'TypeNode',
   FunctionType: 'TypeNode',
@@ -253,6 +276,8 @@ const NODE_CATEGORY: Record<string, NodeCategory> = {
   NullableType: 'TypeNode',
   UnionType: 'TypeNode',
   TupleType: 'TypeNode',
+  LiteralTypeNode: 'TypeNode',
+  IntersectionType: 'TypeNode',
   // Other (per-kind only, no category fallback)
   Program: 'Other',
   ErrorNode: 'Other',
@@ -329,6 +354,9 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       if (n.recordType) {
         children.push(n.recordType);
       }
+      if (n.typeAlias) {
+        children.push(n.typeAlias);
+      }
       for (const v of n.variants) children.push(v);
       break;
     }
@@ -368,6 +396,16 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       const n = node as ExportSpecifier;
       children.push(n.local);
       if (n.exported) children.push(n.exported);
+      break;
+    }
+    case 'ExtensionFunctionDeclaration': {
+      const n = node as ExtensionFunctionDeclaration;
+      children.push(n.receiverType);
+      if (n.typeParams) for (const tp of n.typeParams) children.push(tp);
+      children.push(n.name);
+      for (const p of n.params) children.push(p);
+      children.push(n.returnType);
+      children.push(n.body);
       break;
     }
     // ── Expressions ──
@@ -481,11 +519,27 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       }
       break;
     }
+    case 'AwaitExpr': {
+      const n = node as AwaitExpr;
+      children.push(n.argument);
+      break;
+    }
+    case 'NamedArgument': {
+      const n = node as NamedArgument;
+      children.push(n.name);
+      children.push(n.value);
+      break;
+    }
     // ── Statements ──
     case 'ForStatement': {
       const n = node as ForStatement;
       children.push(n.variable);
-      children.push(n.iterable);
+      if (n.range) {
+        children.push(n.range.start);
+        children.push(n.range.end);
+      } else {
+        children.push(n.iterable);
+      }
       children.push(n.body);
       break;
     }
@@ -544,6 +598,11 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       children.push(n.name);
       break;
     }
+    case 'TuplePattern': {
+      const n = node as TuplePattern;
+      for (const el of n.elements) children.push(el);
+      break;
+    }
     // ── Type Nodes ──
     case 'NamedType': {
       const n = node as NamedType;
@@ -583,9 +642,20 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
       for (const el of n.elements) children.push(el);
       break;
     }
+    case 'LiteralTypeNode': {
+      const n = node as LiteralTypeNode;
+      children.push(n.literal);
+      break;
+    }
     case 'TypeParameter': {
       const n = node as TypeParameter;
       children.push(n.name);
+      if (n.constraint) children.push(n.constraint);
+      break;
+    }
+    case 'IntersectionType': {
+      const n = node as IntersectionType;
+      for (const m of n.members) children.push(m);
       break;
     }
     // ── Leaf nodes (no children) ──
@@ -594,6 +664,7 @@ function getChildren(node: ASTNodeBase): readonly ASTNodeBase[] {
     case 'BooleanLiteral':
     case 'NullLiteral':
     case 'Identifier':
+    case 'ThisExpr':
     case 'WildcardPattern':
     case 'NullPattern':
     case 'BreakStatement':
