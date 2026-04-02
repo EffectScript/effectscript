@@ -1,6 +1,89 @@
 # Changelog
 
-## [0.2.0] - Unreleased
+## [0.3.0] - Unreleased
+
+### Added
+- Tuple expressions: `let pair = (1, "hello")` creates a tuple value (compiles to JS array)
+- Tuple positional indexing: `pair.0`, `pair.1` access tuple elements by position (compiles to bracket access)
+- Let tuple destructuring: `let (a, b) = pair` destructures into individual bindings
+- Tuple patterns in match: `(0, _) => "zero"` for structural matching on tuples
+- Bidirectional type inference for tuple expressions with expected type context
+- Diagnostic codes E270 (index out of bounds), E271 (arity mismatch), E272 (expected tuple for destructuring), E273 (expected tuple for pattern)
+- Generic inference through tuples: `<T>(x: (T, T)): T` correctly infers from tuple arguments
+- `bigint` primitive type: type annotations (`let x: bigint = 42n`), bigint literals (`42n`, `0xFFn`), type-safe arithmetic (`+`, `-`, `*`, `/`, `%` between bigint values), unary negation, nullable `bigint?`
+- `symbol` primitive type: type annotations (`let x: symbol`), nullable `symbol?`, equality comparison
+- BigInt literal tokenization in the lexer (`BigIntLiteral` token kind)
+- `BigIntLiteral` AST node with string-based `raw` field for precision preservation
+- Mixed `bigint`/`number` arithmetic is rejected with E216
+- TypeScript interop: `bigint`, `symbol`, `unique symbol`, and bigint literal types now map to proper EffectScript primitives instead of `Any` (no more W301 warnings)
+- Diagnostic E006: BigInt literals cannot have a decimal part (`3.14n` is rejected)
+
+### Added (continued)
+- Record field mutability: fields are immutable by default (bare), use `var` prefix for mutable fields (`type T = { name: string, var score: number }`)
+- Diagnostic E275: assignment to immutable record field with fix suggestion and related span pointing to field declaration
+- Value type checking on member expression assignments (bundled fix for pre-existing gap)
+- DTS emitter: immutable fields emit `readonly`, mutable fields emit bare (matching TypeScript conventions)
+- TypeScript interop: `readonly` properties map to immutable fields, non-`readonly` properties map to mutable fields
+- `typeToString` shows `var` prefix on mutable fields in diagnostic messages (e.g., `{ var score: number }`)
+- `typesEqual` considers `mutableFields` for exact type identity (records with different mutability are different types)
+- Generic instantiation preserves `mutableFields` through type parameter substitution
+- Structural interfaces: `interface Serializable { fun serialize(): string }` defines type contracts with methods and properties
+- Interface extension: `interface ReadableCollection<T> extends Collection<T> { ... }` for interface inheritance
+- Generic interfaces with type parameter substitution: `interface Box<T> { let value: T }`
+- Interface structural satisfaction: records satisfy interfaces via matching properties/fields (no explicit `implements` required)
+- `export interface` declarations emit `export interface` in `.d.ts` output; type-erased in JS (no runtime cost)
+- Readonly (`let`) and mutable (`var`) interface properties with assignment enforcement
+- `interface` and `extends` are now reserved keywords
+- TS `declare class` imports are now constructable via `new ClassName(args)` — classes map to `InterfaceType` with constructor signatures instead of degraded record types
+- TS interfaces map to `InterfaceType` preserving method signatures, optional members, readonly/mutable properties, and extends hierarchy
+- TS callable interfaces (call signatures) map to `__call` method entries, enabling `obj()` syntax on interface-typed values
+- Static vs instance member separation for TS classes: `typeof Command` (class value) vs `Command` (instance type)
+- Diagnostic codes E282 (duplicate interface member), E283 (circular extends), E284 (no constructor for `new`), E285 (reserved `__call` name)
+- W210 warning on explicit `Any` type annotations: `let x: Any = ...` emits a warning encouraging more specific types
+- W210 detects `Any` at all nesting levels: type arguments (`Array<Any>`), nullable (`Any?`), function types, record fields, union members, tuple elements, intersection members, and generic constraints
+- Catch parameters now typed as `{ message: string, name: string, stack: string? }` instead of `Any`, providing safe access to standard Error fields
+- Index signature types (dictionary types): `{ [string]: T }` and `{ [number]: T }` for dynamic key-value patterns
+- Mixed named fields with index signatures: `{ status: number, [string]: Any }`
+- `IndexExpr` bracket access: `obj["key"]`, `obj[variable]`, `obj?.["key"]` for optional chaining
+- Index access returns nullable (`T?`) for null safety — string literal bracket access on named fields returns the field type (non-nullable)
+- Assignment to bracket expressions on mutable bindings: `config["key"] = "value"`
+- Array bracket access: `arr[0]` returns `T?` (nullable element type)
+- Tuple bracket access: `pair[0]` returns exact element type (non-nullable); dynamic index returns nullable union
+- Generic index signature type aliases: `type Container<T> = { [string]: T }` with proper instantiation
+- TypeScript interop: TS index signatures (`{ [key: string]: T }`, `Record<string, T>`) now map to `IndexSignatureType` instead of empty record types
+- Diagnostic codes E120 (invalid index signature key type), E290 (key type mismatch), E291 (no index signature), E292 (field incompatible with index value type), E293 (duplicate index signature)
+- Platform types: unmappable TypeScript types (conditional types, recursive cycles, budget-capped interfaces) now produce platform types (`T!`) instead of falling back to `Any`, preserving partial structural type information
+- W303 warning when platform-typed values are used in contexts where the approximation could cause runtime issues (function arguments, return values, arithmetic, match subjects, assignments to exact-typed bindings)
+- W304 warning when recursive type substitution exceeds the depth limit (emitted once per substitution)
+- W305 warning when lazy property resolution exceeds the budget cap on large interfaces
+- `typeToString` renders platform types with `!` suffix in diagnostic messages (e.g., `string!`, `{ name: string }!`)
+- Platform-aware type checker: field access, null narrowing, pattern matching, `await`, `for` loops, and binary operators all unwrap platform types to operate on the inner type
+- `makePlatform` factory normalizes nested platform wrappers and collapses error type wrapping
+- `substitute()` depth limit (MAX_SUBSTITUTE_DEPTH=40) with cycle detection returns platform types instead of `Any` on recursive type cycles
+- Conditional type evaluation: TypeScript conditional types (`T extends U ? A : B`) are now resolved to concrete EffectScript types instead of falling back to `Any`. Uses a 4-strategy resolution pipeline: single resolved branch, base constraint, apparent type, and branch union construction. Enables type-safe interop with TS libraries using `ReturnType<T>`, `NonNullable<T>`, `Extract<T, U>`, `Exclude<T, U>`, `Awaited<T>`, and other conditional utility types.
+
+### Fixed
+- Arrow function callees in call expressions now emit valid IIFE syntax with wrapping parentheses: `(async () => { ... })()` instead of `async () => { ... }()`
+- `Date` is now available as a built-in global: `new Date()`, `new Date("2026-12-25")`, `new Date(0)`, `Date.now()`, and instance methods (`getTime`, `toISOString`, `getFullYear`, etc.)
+- `Promise<T>` now has built-in `.then()`, `.catch()`, and `.finally()` methods (previously produced E209 "Property does not exist on type 'Promise<T>'")
+- Rest parameters on generic imported functions now correctly substitute type parameters (e.g., `arrayOf<T>(...items: T[])` works with inferred and explicit type args)
+- Function type substitution (`substituteTypeParams` and `substitute`) now preserves rest parameter fields instead of dropping them
+- Disk cache serialization/deserialization now round-trips rest parameter metadata
+- DTS emitter now includes rest parameters in emitted function type signatures (e.g., `(msg: string, ...args: string[]) => void`)
+- Function assignability (`isAssignableTo`) now correctly handles rest parameters on source and target types
+- Recursive type definitions (e.g., React's `ReactNode`) no longer crash the compiler with stack overflow in `substitute()`, `substituteType()`, `flattenUnion()`, or `typeToString()` — cycles are detected via visited sets and broken by returning `Any`
+- Large type surfaces (lodash, hono) no longer cause out-of-memory crashes — interfaces above 30 properties use lazy on-demand resolution instead of eagerly mapping all properties
+
+### Changed
+- **Breaking**: `let mut` syntax replaced with `var` for mutable variable declarations (`var counter = 0`)
+- **Breaking**: `mut` keyword on function parameters renamed to `var` (`(var items: Array<number>)`)
+- `mut` is no longer a reserved keyword and can be used as an identifier
+- **Breaking**: Catch parameter `e` in `try { } catch (e) { }` is now typed as `{ message: string, name: string, stack: string? }` instead of `Any`. Code that relied on `e` being `Any` (e.g., `let s: string = e`) will now get E200 type errors. Use `e.message` for the error message string.
+
+### Verified
+- Optional parameters from TypeScript `.d.ts` files are correctly omittable at call sites (regression tests added for direct calls, interface method calls, all-optional params, and hasDefault params)
+
+## [0.2.0] - 2026-03-25
 
 ### Added
 - Extension functions: `fun Type.method(): ReturnType => body` adds methods to existing types

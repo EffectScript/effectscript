@@ -1,0 +1,35 @@
+{
+  "name": "effectscript",
+  "version": "0.3.0",
+  "description": "EffectScript CLI — compile, check, and run .efs files",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/effectscript/effectscript.git",
+    "directory": "packages/cli"
+  },
+  "bin": {
+    "esc": "./dist/bin.js"
+  },
+  "main": "./dist/cli.js",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "effectscript-compiler": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "vitest": "^3.0.0"
+  }
+}

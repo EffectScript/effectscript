@@ -6,7 +6,7 @@ EffectScript brings ideas from Kotlin and Rust — immutability by default, null
 
 ## Features
 
-- **Immutable by default** — `let` bindings are immutable; opt into mutation with `let mut`
+- **Immutable by default** — `let` bindings are immutable; opt into mutation with `var`
 - **Null safety** — nullable types are explicit (`Type?`), with `?.`, `??`, and exhaustive pattern matching
 - **Algebraic data types** — define variants with named or positional fields
 - **Pattern matching** — exhaustive `match` expressions with destructuring
@@ -15,9 +15,11 @@ EffectScript brings ideas from Kotlin and Rust — immutability by default, null
 - **Async/await** — native `async` functions with `Promise<T>` types and `await` expressions
 - **Named arguments** — call functions with `name: value` syntax for readability; skip defaulted parameters
 - **Generic constraints** — bound type parameters with `<T: { name: string }>` for type-safe generic code
+- **BigInt and Symbol** — first-class `bigint` literals (`42n`) with type-safe arithmetic, and `symbol` type for JS interop
 - **Built-in collections** — `Set<T>` and `Map<K, V>` with null-safe methods, plus expanded `Array<T>` methods
+- **Tuples** — fixed-length heterogeneous sequences with expressions `(1, "hello")`, positional indexing `.0`, destructuring, and match patterns
 - **Enhanced for loops** — range loops (`for (i in 0..<10)`), record/tuple destructuring, and `withIndex()` iteration
-- **TypeScript interop** — import `.d.ts` types directly; generates `.js` + `.d.ts` output
+- **TypeScript interop** — import `.d.ts` types directly; generates `.js` + `.d.ts` output; conditional types (`ReturnType<T>`, `NonNullable<T>`, etc.) are resolved to concrete types; platform types preserve partial type info for remaining unmappable TS constructs
 - **Familiar syntax** — if you know TypeScript, you can read EffectScript
 
 ## Quick Look
@@ -28,7 +30,7 @@ let name = "world"
 let greeting = "Hello, ${name}"
 
 // Mutable when needed
-let mut counter = 0
+var counter = 0
 counter = counter + 1
 
 // Null safety

@@ -1,0 +1,61 @@
+{
+  "name": "effectscript-compiler",
+  "version": "0.3.0",
+  "description": "EffectScript compiler — a safer JavaScript with full TypeScript interop",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/effectscript/effectscript.git",
+    "directory": "packages/compiler"
+  },
+  "homepage": "https://github.com/effectscript/effectscript#readme",
+  "bugs": {
+    "url": "https://github.com/effectscript/effectscript/issues"
+  },
+  "main": "./dist/compiler.js",
+  "types": "./dist/compiler.d.ts",
+  "exports": {
+    ".": "./dist/compiler.js",
+    "./filesystem": "./dist/filesystem.js",
+    "./config": "./dist/config.js",
+    "./host": "./dist/host.js",
+    "./diagnostics/codes": "./dist/diagnostics/codes.js",
+    "./diagnostics/formatter": "./dist/diagnostics/formatter.js",
+    "./diagnostics/collector": "./dist/diagnostics/collector.js",
+    "./diagnostics/diagnostic": "./dist/diagnostics/diagnostic.js",
+    "./utils/constants": "./dist/utils/constants.js",
+    "./utils/operators": "./dist/utils/operators.js",
+    "./utils/type-helpers": "./dist/utils/type-helpers.js",
+    "./pipeline": "./dist/pipeline.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "effectscript",
+    "compiler",
+    "programming-language",
+    "javascript",
+    "typescript",
+    "null-safety",
+    "pattern-matching",
+    "algebraic-data-types"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "typescript": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -22,17 +22,28 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
-        working-directory: compiler
-        run: npm ci
+        run: npm install
 
-      - name: TypeCheck
-        working-directory: compiler
+      - name: TypeCheck compiler
+        working-directory: packages/compiler
         run: npm run typecheck
 
-      - name: Test
-        working-directory: compiler
+      - name: TypeCheck CLI
+        working-directory: packages/cli
+        run: npm run typecheck
+
+      - name: Test compiler
+        working-directory: packages/compiler
         run: npm run test
 
-      - name: Build
-        working-directory: compiler
+      - name: Test CLI
+        working-directory: packages/cli
+        run: npm run test
+
+      - name: Build compiler
+        working-directory: packages/compiler
+        run: npm run build
+
+      - name: Build CLI
+        working-directory: packages/cli
         run: npm run build
